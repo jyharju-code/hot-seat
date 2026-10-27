@@ -22,5 +22,5 @@ app.server.on("upgrade", (request, socket, head) => {
 });
 wss.on("connection", (ws) => ws.close(1008, "Not implemented yet"));
 
-await app.listen({ host: config.HOST, port: config.PORT });
-app.log.info(`Hot Seat server listening on http://${config.HOST}:${config.PORT}`);
+await app.listen({ host: config.SERVER_HOST, port: config.SERVER_PORT });
+app.log.info(`Hot Seat server listening on http://${config.SERVER_HOST}:${config.SERVER_PORT}`);

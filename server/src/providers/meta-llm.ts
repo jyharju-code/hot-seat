@@ -33,7 +33,7 @@ export class MetaLlm implements Llm {
     if (!options.apiKey) throw new Error("MetaLlm requires an apiKey (MODEL_API_KEY)");
     this.apiKey = options.apiKey;
     this.baseUrl = (options.baseUrl ?? "https://api.meta.ai/v1").replace(/\/$/, "");
-    this.chatModel = options.chatModel ?? "muse-spark-1.0";
+    this.chatModel = options.chatModel ?? "muse-spark-1.3";
     this.structuredModel = options.structuredModel ?? "muse-wonder-1.0";
     this.fetchFn = options.fetchFn ?? fetch;
   }

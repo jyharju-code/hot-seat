@@ -29,6 +29,11 @@ One `npm run dev` starts both parts:
 - Server: http://127.0.0.1:3001 (health check: `GET /api/health`, provider
   status: `GET /api/providers`, no secrets are returned)
 
+The server binds `SERVER_PORT` (default 3001) on `SERVER_HOST` (default
+127.0.0.1). It deliberately ignores `PORT`, which tools and hosts set for
+the web process. The Vite `/api` proxy reads the same `SERVER_PORT`, so
+the two can never drift.
+
 Checks:
 
 ```bash
@@ -61,7 +66,10 @@ interfaces with TODO stubs that throw `NotImplemented`. One integration test cal
 the live Meta API and is skipped unless `MODEL_API_KEY` is set.
 
 Config keys (see `.env.example`): `MODEL_API_KEY`, `ELEVENLABS_API_KEY`,
-`SONIOX_API_KEY`, `BASETEN_API_KEY`. Never commit `.env`.
+`SONIOX_API_KEY`, `BASETEN_API_KEY`. Optional overrides: `SERVER_PORT`
+(default 3001), `SERVER_HOST` (default 127.0.0.1), `LLM_CHAT_MODEL`
+(default `muse-spark-1.3`), `LLM_STRUCTURED_MODEL` (default
+`muse-wonder-1.0`). Never commit `.env`.
 
 ## Built during the hackathon
 

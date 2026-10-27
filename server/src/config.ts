@@ -4,8 +4,8 @@ const emptyToUndefined = (v: unknown) => (v === "" ? undefined : v);
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  HOST: z.string().min(1).default("127.0.0.1"),
-  PORT: z.coerce.number().int().positive().max(65535).default(3001),
+  SERVER_HOST: z.string().min(1).default("127.0.0.1"),
+  SERVER_PORT: z.coerce.number().int().positive().max(65535).default(3001),
   MODEL_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   ELEVENLABS_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   SONIOX_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
@@ -27,7 +27,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   return {
     ...parsed.data,
-    llmChatModel: parsed.data.LLM_CHAT_MODEL ?? "muse-spark-1.0",
+    llmChatModel: parsed.data.LLM_CHAT_MODEL ?? "muse-spark-1.3",
     llmStructuredModel: parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
   };
 }

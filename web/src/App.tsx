@@ -29,7 +29,6 @@ export function App() {
         <a className="wordmark" href="/">hot seat.</a>
         <nav className="nav" aria-label="Main">
           <a className="current" href="/">Home</a>
-          <a href="#providers">Providers</a>
         </nav>
       </header>
       <main>

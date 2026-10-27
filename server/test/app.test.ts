@@ -7,11 +7,24 @@ import { StubImageGen, StubSpeechToText, StubTextToSpeech, NotImplementedError }
 describe("config", () => {
   it("applies defaults and treats empty keys as unset", () => {
     const c = loadConfig({ MODEL_API_KEY: "" });
-    expect(c.PORT).toBe(3001);
+    expect(c.SERVER_PORT).toBe(3001);
+    expect(c.SERVER_HOST).toBe("127.0.0.1");
     expect(c.MODEL_API_KEY).toBeUndefined();
   });
   it("rejects a bad port", () => {
-    expect(() => loadConfig({ PORT: "nope" })).toThrow(/Invalid configuration/);
+    expect(() => loadConfig({ SERVER_PORT: "nope" })).toThrow(/Invalid configuration/);
+  });
+  it("PORT alone does not change the server port", () => {
+    expect(loadConfig({ PORT: "5173" }).SERVER_PORT).toBe(3001);
+    expect(loadConfig({ PORT: "nope" }).SERVER_PORT).toBe(3001);
+  });
+  it("SERVER_PORT and SERVER_HOST override the defaults", () => {
+    const c = loadConfig({ SERVER_PORT: "4000", SERVER_HOST: "0.0.0.0" });
+    expect(c.SERVER_PORT).toBe(4000);
+    expect(c.SERVER_HOST).toBe("0.0.0.0");
+  });
+  it("defaults the chat model to muse-spark-1.3", () => {
+    expect(loadConfig({}).llmChatModel).toBe("muse-spark-1.3");
   });
   it("provider statuses never expose secrets", () => {
     const s = providerStatuses(loadConfig({ MODEL_API_KEY: "secret-value" }));
@@ -46,13 +59,23 @@ describe("MetaLlm adapter (mocked fetch)", () => {
     const fetchFn = (async (u: string, init?: RequestInit) => {
       url = String(u);
       auth = String((init?.headers as Record<string, string>).authorization);
-      return new Response(JSON.stringify({ model: "muse-spark-1.0", choices: [{ message: { content: "Hello." }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ model: "muse-spark-1.3", choices: [{ message: { content: "Hello." }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
     const llm = new MetaLlm({ apiKey: "k", fetchFn });
     const out = await llm.chat({ messages: [{ role: "user", content: "Hi" }] });
     expect(url).toBe("https://api.meta.ai/v1/chat/completions");
     expect(auth).toBe("Bearer k");
     expect(out.text).toBe("Hello.");
+  });
+  it("chat defaults to muse-spark-1.3", async () => {
+    let bodyModel = "";
+    const fetchFn = (async (_u: string, init?: RequestInit) => {
+      bodyModel = (JSON.parse(String(init?.body)) as { model: string }).model;
+      return new Response(JSON.stringify({ model: bodyModel, choices: [{ message: { content: "Hi." }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const llm = new MetaLlm({ apiKey: "k", fetchFn });
+    await llm.chat({ messages: [{ role: "user", content: "Hi" }] });
+    expect(bodyModel).toBe("muse-spark-1.3");
   });
   it("generateStructured parses JSON from the Responses API", async () => {
     const fetchFn = (async () => new Response(JSON.stringify({ output_text: '{"title":"Crisis"}' }), { status: 200 })) as typeof fetch;
