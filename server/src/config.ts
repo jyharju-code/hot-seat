@@ -1,0 +1,42 @@
+import { z } from "zod";
+
+const emptyToUndefined = (v: unknown) => (v === "" ? undefined : v);
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  HOST: z.string().min(1).default("127.0.0.1"),
+  PORT: z.coerce.number().int().positive().max(65535).default(3001),
+  MODEL_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  ELEVENLABS_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  SONIOX_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  BASETEN_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  LLM_CHAT_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  LLM_STRUCTURED_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+});
+
+export type Config = z.infer<typeof envSchema> & {
+  llmChatModel: string;
+  llmStructuredModel: string;
+};
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const parsed = envSchema.safeParse(env);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "env"}: ${i.message}`).join("; ");
+    throw new Error(`Invalid configuration: ${issues}`);
+  }
+  return {
+    ...parsed.data,
+    llmChatModel: parsed.data.LLM_CHAT_MODEL ?? "muse-spark-1.0",
+    llmStructuredModel: parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
+  };
+}
+
+export function providerStatuses(config: Config) {
+  return [
+    { id: "llm" as const, label: "Language model (Muse Spark / Wonder)", adapter: "Meta Model API", configured: Boolean(config.MODEL_API_KEY) },
+    { id: "speech-to-text" as const, label: "Speech to text (Muse Voice Transcribe)", adapter: "Meta Muse Voice Transcribe", configured: Boolean(config.MODEL_API_KEY) },
+    { id: "text-to-speech" as const, label: "Text to speech (ElevenLabs)", adapter: "ElevenLabs eleven_v4", configured: Boolean(config.ELEVENLABS_API_KEY) },
+    { id: "image-gen" as const, label: "Image (Muse Image)", adapter: "Meta Muse Image", configured: Boolean(config.MODEL_API_KEY) },
+  ];
+}
