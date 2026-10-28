@@ -14,9 +14,11 @@ export interface CameraStill {
 export function Session({
   scenarioId,
   onEnd,
+  onExpired,
 }: {
   scenarioId: string;
   onEnd: (still: CameraStill | null) => void;
+  onExpired?: () => void;
 }) {
   const [live, setLive] = useState(false);
   const [state, setState] = useState<SessionState | null>(null);
@@ -25,6 +27,7 @@ export function Session({
   const [entries, setEntries] = useState<Entry[]>([]);
   const [newsFlash, setNewsFlash] = useState("");
   const [error, setError] = useState("");
+  const [expired, setExpired] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const stateRef = useRef<SessionState | null>(null);
@@ -174,7 +177,12 @@ export function Session({
       }, wait + 50);
     } else if (msg.type === "timing") {
       setEntries((e) => { const c = [...e]; for (let i = c.length - 1; i >= 0; i--) { if (c[i]?.role === "reporter") { c[i] = { ...c[i]!, timing: msg.timing }; break; } } return c; });
-    } else if (msg.type === "error") setError(msg.message);
+    } else if (msg.type === "error") {
+      if (/expired|Unknown scenarioId/i.test(msg.message)) {
+        setExpired(true);
+        setError("This scenario has expired. Build it again.");
+      } else setError(msg.message);
+    }
   }
   function end() {
     try { wsRef.current?.send(JSON.stringify({ type: "stop" })); } catch { /* closed */ }
@@ -188,6 +196,13 @@ export function Session({
       <h1 className="status-headline">{live ? <>Live. <span className="live-dot" aria-label="live" /></> : "Ready."} <span className="clock">{fmtClock(elapsed)}</span></h1>
       <p className="muted">{live ? statusText : "Starting microphone."}</p>
       {error && <p className="error">{error}</p>}
+      {expired && (
+        <p>
+          <button className="primary" type="button" onClick={() => onExpired?.()}>
+            Setup
+          </button>
+        </p>
+      )}
       <div className="qa">
         <section><h2>Reporter</h2><p className="headline-q">{question || "The reporter is preparing the first question."}</p></section>
         <section><h2>You</h2><p>{lastAnswer || "Your last answer will appear here."}</p></section>

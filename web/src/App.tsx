@@ -142,6 +142,7 @@ export function App() {
         <Session
           key={view.runId}
           scenarioId={view.built.id}
+          onExpired={() => setView({ kind: "setup" })}
           onEnd={(still) =>
             setView({ kind: "debriefing", built: view.built, still, startedAt: Date.now() })
           }
