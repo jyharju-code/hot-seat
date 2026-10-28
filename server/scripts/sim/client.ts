@@ -4,6 +4,7 @@ import type { OwnerAgent } from "./owner.js";
 import { estimateTtsChars } from "./owner.js";
 import { detectSplit, isRepeat, stripCutOff, wordCount, wordErrorRate } from "./metrics.js";
 import { FRAME_BYTES, pcmDurationMs } from "./pacing.js";
+import { ReporterLineQueue, linePlaybackMs } from "./reporter-queue.js";
 import { synthesizeAnswer } from "./voice.js";
 import type { TextToSpeech } from "../../src/providers/text-to-speech.js";
 
@@ -68,8 +69,7 @@ interface LiveState {
   interrupted: boolean;
   ended: boolean;
   errorCount: number;
-  audioEndCount: number;
-  phaseAudioBytes: number;
+  reporterQueue: ReporterLineQueue;
   firstAudioAt: number | null;
   awaitingFirstAudio: boolean;
   transcript: TranscriptLine[];
@@ -83,8 +83,7 @@ const freshState = (): LiveState => ({
   interrupted: false,
   ended: false,
   errorCount: 0,
-  audioEndCount: 0,
-  phaseAudioBytes: 0,
+  reporterQueue: new ReporterLineQueue(),
   firstAudioAt: null,
   awaitingFirstAudio: false,
   transcript: [],
@@ -167,7 +166,7 @@ export class SimSession {
     this.ws = ws;
     ws.on("message", (data: Buffer, isBinary: boolean) => {
       if (isBinary) {
-        this.state.phaseAudioBytes += data.length;
+        this.state.reporterQueue.noteAudio(data.length);
         if (this.state.awaitingFirstAudio && this.state.firstAudioAt === null) {
           this.state.firstAudioAt = performance.now();
           this.state.awaitingFirstAudio = false;
@@ -182,7 +181,7 @@ export class SimSession {
       }
       if (msg.type === "session_started") this.state.sessionId = msg.sessionId;
       else if (msg.type === "state") this.state.lastState = msg.state;
-      else if (msg.type === "audio_end") this.state.audioEndCount += 1;
+      else if (msg.type === "audio_end") this.state.reporterQueue.noteAudioEnd();
       else if (msg.type === "interrupt") this.state.interrupted = true;
       else if (msg.type === "ended") this.state.ended = true;
       else if (msg.type === "error") {
@@ -191,7 +190,10 @@ export class SimSession {
       } else if (msg.type === "transcript") {
         this.state.transcript.push({ role: msg.role, text: msg.text });
         if (msg.role === "user") this.state.userTranscripts.push({ text: msg.text, atMs: performance.now() });
-        if (msg.role === "reporter") this.state.lastReporterText = msg.text;
+        if (msg.role === "reporter") {
+          this.state.lastReporterText = msg.text;
+          this.state.reporterQueue.noteText(msg.text);
+        }
       }
     });
     await new Promise<void>((resolve, reject) => {
@@ -205,13 +207,12 @@ export class SimSession {
   /** Wait out one reporter line (real playback), answer it, measure the reply. */
   private async playTurn(turn: number, scenario: GeneratedScenario, previousReporter: string): Promise<TurnMetric> {
     const errorsAtStart = this.state.errorCount;
-    // 1) Reporter audio is playing in a real browser: wait for its end, then
-    // sit through the playback duration (24 kHz PCM16: 48 bytes per ms).
-    const audioEndsBefore = this.state.audioEndCount;
-    this.state.phaseAudioBytes = 0;
-    await this.waitFor(() => this.state.audioEndCount > audioEndsBefore, "reporter audio_end");
-    const playbackMs = Math.round(this.state.phaseAudioBytes / 48);
-    const reporterText = this.state.lastReporterText;
+    // 1) Consume exactly one reporter line (the opening question or the
+    // previous reply/cut-in) and sit through its real playback duration.
+    await this.waitFor(() => this.state.reporterQueue.hasEndedLine(), "reporter audio_end");
+    const line = this.state.reporterQueue.consume()!;
+    const playbackMs = linePlaybackMs(line);
+    const reporterText = line.text;
     await sleep(playbackMs);
     this.ws?.send(JSON.stringify({ type: "playback_done" }));
     await this.waitFor(() => this.state.lastState === "listening", "listening state");
@@ -267,16 +268,17 @@ export class SimSession {
       this.state.awaitingFirstAudio = true;
     }
 
-    // 4) Wait for the reporter's reply audio (the cut-in, when interrupted).
-    const replyEndsBefore = this.state.audioEndCount;
+    // 4) Wait for the reporter's reply line (the cut-in, when interrupted).
+    // It stays queued: the next turn consumes it. A reply that already
+    // ended during the trailing silence is seen at once, not missed.
     await this.waitFor(
-      () => this.state.audioEndCount > replyEndsBefore || this.state.ended,
+      () => this.state.reporterQueue.hasEndedLine() || this.state.ended,
       "reporter reply audio_end",
     );
     const interrupted = stoppedForInterrupt || this.state.interrupted;
     const turnTranscripts = this.state.userTranscripts.slice(transcriptsBefore);
     const transcriptText = stripCutOff(turnTranscripts.map((t) => t.text).join(" "));
-    const nextReporter = this.state.lastReporterText;
+    const nextReporter = this.state.reporterQueue.peekEnded()?.text ?? this.state.lastReporterText;
     return {
       turn: turn + 1,
       latency_ms:

@@ -18,6 +18,7 @@ import {
   takeUntilInterrupt,
 } from "../scripts/sim/pacing.js";
 import { estimateTtsChars, parseOwnerSegments } from "../scripts/sim/owner.js";
+import { ReporterLineQueue, linePlaybackMs } from "../scripts/sim/reporter-queue.js";
 import { estimateTotalChars, parseArgs } from "../scripts/sim/main.js";
 
 describe("sim WER", () => {
@@ -96,6 +97,44 @@ describe("sim pacing schedule with pauses", () => {
     expect(takeUntilInterrupt(plan, null)).toHaveLength(plan.length);
     expect(shouldStopSpeaking(true)).toBe(true);
     expect(shouldStopSpeaking(false)).toBe(false);
+  });
+});
+
+describe("sim reporter line queue", () => {
+  it("consumes exactly one ended line per turn, in order", () => {
+    const q = new ReporterLineQueue();
+    q.noteText("Opening question?");
+    q.noteAudio(4800);
+    expect(q.consume()).toBeUndefined();
+    q.noteAudioEnd();
+    q.noteText("Follow-up?");
+    q.noteAudio(9600);
+    q.noteAudioEnd();
+    expect(q.pendingCount).toBe(2);
+    expect(q.consume()).toEqual({ text: "Opening question?", audioBytes: 4800, ended: true });
+    expect(q.consume()).toEqual({ text: "Follow-up?", audioBytes: 9600, ended: true });
+    expect(q.consume()).toBeUndefined();
+  });
+
+  it("a reply that ended before the turn looked for it is not missed", () => {
+    const q = new ReporterLineQueue();
+    q.noteText("Fast reply.");
+    q.noteAudio(48000);
+    q.noteAudioEnd();
+    // No baseline was taken before the reply finished; it is still there.
+    expect(q.hasEndedLine()).toBe(true);
+    expect(linePlaybackMs(q.peekEnded()!)).toBe(1000);
+    expect(q.consume()?.text).toBe("Fast reply.");
+    expect(q.hasEndedLine()).toBe(false);
+  });
+
+  it("audio arriving before its transcript still lands on the same line", () => {
+    const q = new ReporterLineQueue();
+    q.noteAudio(2400);
+    q.noteText("Cut in!");
+    q.noteAudio(2400);
+    q.noteAudioEnd();
+    expect(q.consume()).toEqual({ text: "Cut in!", audioBytes: 4800, ended: true });
   });
 });
 
