@@ -181,6 +181,7 @@ describe("SessionOrchestrator (fake adapters)", () => {
       log: (l) => logs.push(l),
     });
     await orch.start();
+    await orch.playbackDone();
     return { stt, tts, messages, audio, orch, logs, brainCalls };
   }
 
@@ -203,6 +204,7 @@ describe("SessionOrchestrator (fake adapters)", () => {
     stt.sessions[0]!.emit({ type: "final", text: "We had no idea about the case.", turnId: "t1" });
     await tick();
     await tick();
+    await orch.playbackDone();
 
     const states = messages.filter((m) => m.type === "state").map((m) => (m.type === "state" ? m.state : ""));
     expect(states).toEqual(["thinking", "speaking", "listening", "thinking", "speaking", "listening"]);
@@ -228,7 +230,7 @@ describe("SessionOrchestrator (fake adapters)", () => {
   it("concatenates two finals 600 ms apart into one turn (1500 ms silence)", async () => {
     vi.useFakeTimers();
     try {
-      const { stt, messages, brainCalls } = await started({ turnEndSilenceMs: 1500 });
+      const { stt, messages, brainCalls, orch } = await started({ turnEndSilenceMs: 1500 });
       const s = stt.sessions[0]!;
       s.emit({ type: "final", text: "We take this extremely seriously." });
       await vi.advanceTimersByTimeAsync(600);
@@ -248,6 +250,8 @@ describe("SessionOrchestrator (fake adapters)", () => {
         role: "user",
         text: "We take this extremely seriously. We pulled the pastries that morning.",
       });
+      expect(stt.sessions.length).toBe(1);
+      await orch.playbackDone();
       expect(stt.sessions.length).toBe(2);
     } finally {
       vi.useRealTimers();
@@ -312,6 +316,8 @@ describe("SessionOrchestrator (fake adapters)", () => {
     await tick();
     const allPushed = stt.sessions.flatMap((s) => s.pushed);
     expect(allPushed).toHaveLength(1);
+    expect(orch.currentState).toBe("speaking");
+    await orch.playbackDone();
     expect(orch.currentState).toBe("listening");
     // Listening again on the fresh session: pushes flow there.
     orch.pushAudio(new Uint8Array([3]));
@@ -368,6 +374,7 @@ describe("Speculative turn (fake STT + fake LLM counting calls and aborts)", () 
       turnEndSilenceMs: 100,
     });
     await orch.start();
+    await orch.playbackDone();
     llm.calls = 0;
     llm.aborts = 0;
     llm.prompts = [];
@@ -386,6 +393,8 @@ describe("Speculative turn (fake STT + fake LLM counting calls and aborts)", () 
     expect(llm.calls).toBe(1);
     expect(llm.aborts).toBe(0);
     expect(tts.texts[0]).toBe("Reply to: We fixed it.");
+    expect(orch.currentState).toBe("speaking");
+    await orch.playbackDone();
     expect(orch.currentState).toBe("listening");
   });
 
@@ -404,5 +413,193 @@ describe("Speculative turn (fake STT + fake LLM counting calls and aborts)", () 
     expect(tts.texts).not.toContain("Reply to: We fixed it.");
     const reporterTexts = messages.filter((m) => m.type === "transcript" && m.role === "reporter").map((m) => (m.type === "transcript" ? m.text : ""));
     expect(reporterTexts).not.toContain("Reply to: We fixed it.");
+  });
+});
+
+/** STT session that fails like Muse Voice Transcribe after >1 s without audio. */
+class GapSession implements SttSession {
+  pushed: Uint8Array[] = [];
+  ended = false;
+  private queue: SttEvent[] = [];
+  private waiters: Array<(v: IteratorResult<SttEvent>) => void> = [];
+  private lastPushAt = Date.now();
+  private closed = false;
+  private failed = false;
+  private readonly timer = setInterval(() => {
+    if (this.closed || this.failed) return;
+    if (Date.now() - this.lastPushAt > 1000) {
+      this.failed = true;
+      this.emit({ type: "error", message: "Ingress audio slower than real-time" });
+    }
+  }, 25);
+  push(pcm: Uint8Array): void {
+    this.pushed.push(pcm);
+    this.lastPushAt = Date.now();
+  }
+  end(): void {
+    this.ended = true;
+  }
+  close(): void {
+    this.closed = true;
+    clearInterval(this.timer);
+    while (this.waiters.length) this.waiters.shift()!({ value: undefined, done: true } as IteratorResult<SttEvent>);
+  }
+  /** Simulate the remote side closing the socket unexpectedly. */
+  remoteClose(): void {
+    this.close();
+  }
+  onPartial(_cb: (t: string) => void): void {
+    /* noop */
+  }
+  emit(ev: SttEvent): void {
+    const w = this.waiters.shift();
+    if (w) w({ value: ev, done: false });
+    else this.queue.push(ev);
+  }
+  events(): AsyncIterable<SttEvent> {
+    const { queue, waiters } = this;
+    const isClosed = () => this.closed;
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next(): Promise<IteratorResult<SttEvent>> {
+          const q = queue.shift();
+          if (q) return Promise.resolve({ value: q, done: false });
+          if (isClosed()) return Promise.resolve({ value: undefined, done: true } as IteratorResult<SttEvent>);
+          return new Promise((r) => waiters.push(r));
+        },
+      }),
+    };
+  }
+}
+
+class GapStt implements SpeechToText {
+  sessions: GapSession[] = [];
+  failNextOpens = 0;
+  async openSession(): Promise<SttSession> {
+    if (this.failNextOpens > 0) {
+      this.failNextOpens -= 1;
+      throw new Error("open failed");
+    }
+    const s = new GapSession();
+    this.sessions.push(s);
+    return s;
+  }
+  async *transcribe(): AsyncIterable<{ text: string; isFinal: boolean }> {
+    yield { text: "", isFinal: true };
+  }
+}
+
+describe("Realtime ingress (brief 05a, gap-sensitive fake STT)", () => {
+  function makeOrch(stt: GapStt, opts: { turnEndSilenceMs?: number } = {}) {
+    const tts = new FakeTts();
+    const { messages, sink } = makeSink();
+    const logs: string[] = [];
+    const brain = {
+      openingQuestion: async () => OPENING,
+      nextTurn: async () => parseReporterLine(VALID),
+    };
+    const orch = new SessionOrchestrator({
+      stt,
+      brain: brain as never,
+      tts,
+      sink,
+      scenario: cafeScenario,
+      voiceId: "voice-1",
+      turnEndSilenceMs: opts.turnEndSilenceMs ?? 50,
+      now: () => Date.now(),
+      log: (l) => logs.push(l),
+    });
+    return { orch, messages, logs, tts };
+  }
+  const errors = (messages: ServerMessage[]) => messages.filter((m) => m.type === "error");
+
+  it("opens no STT session before playback_done, and stays speaking until then", async () => {
+    const stt = new GapStt();
+    const { orch, messages } = makeOrch(stt);
+    await orch.start();
+    expect(stt.sessions).toHaveLength(0);
+    expect(orch.currentState).toBe("speaking");
+    orch.pushAudio(new Uint8Array([1, 2]));
+    await tick();
+    expect(stt.sessions).toHaveLength(0);
+    await orch.playbackDone();
+    expect(stt.sessions).toHaveLength(1);
+    expect(orch.currentState).toBe("listening");
+    expect(errors(messages)).toHaveLength(0);
+    await orch.stop();
+  });
+
+  it("pushes 100 ms silence frames so a >1 s gap never fails the session", async () => {
+    vi.useFakeTimers();
+    try {
+      const stt = new GapStt();
+      const { orch, messages } = makeOrch(stt);
+      await orch.start();
+      await orch.playbackDone();
+      const session = stt.sessions[0]!;
+      await vi.advanceTimersByTimeAsync(3000);
+      // No mic frames arrived, yet the gap-sensitive fake never errored.
+      expect(stt.sessions).toHaveLength(1);
+      expect(errors(messages)).toHaveLength(0);
+      expect(orch.currentState).toBe("listening");
+      expect(session.pushed.length).toBeGreaterThan(0);
+      for (const frame of session.pushed) {
+        expect(frame).toHaveLength(3200);
+        expect(frame.every((b) => b === 0)).toBe(true);
+      }
+      await orch.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an STT error mid-turn reopens the session and keeps the collected answer", async () => {
+    const stt = new GapStt();
+    const { orch, messages, logs } = makeOrch(stt);
+    await orch.start();
+    await orch.playbackDone();
+    stt.sessions[0]!.emit({ type: "final", text: "First part." });
+    await tick();
+    stt.sessions[0]!.emit({ type: "error", message: "Ingress audio slower than real-time" });
+    await tick();
+    await tick();
+    expect(stt.sessions).toHaveLength(2);
+    expect(errors(messages)).toHaveLength(0);
+    expect(orch.currentState).toBe("listening");
+    expect(logs.some((l) => l.includes("reopening"))).toBe(true);
+    stt.sessions[1]!.emit({ type: "final", text: "Second part." });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(messages).toContainEqual({ type: "transcript", role: "user", text: "First part. Second part." });
+    expect(errors(messages)).toHaveLength(0);
+    await orch.stop();
+  });
+
+  it("an unexpected STT close mid-turn also reopens without an error", async () => {
+    const stt = new GapStt();
+    const { orch, messages } = makeOrch(stt);
+    await orch.start();
+    await orch.playbackDone();
+    stt.sessions[0]!.remoteClose();
+    await tick();
+    await tick();
+    expect(stt.sessions).toHaveLength(2);
+    expect(errors(messages)).toHaveLength(0);
+    expect(orch.currentState).toBe("listening");
+    await orch.stop();
+  });
+
+  it("shows an error only after two reopen attempts in a row fail", async () => {
+    const stt = new GapStt();
+    const { orch, messages } = makeOrch(stt);
+    await orch.start();
+    await orch.playbackDone();
+    stt.failNextOpens = 2;
+    stt.sessions[0]!.emit({ type: "error", message: "boom" });
+    await tick();
+    await tick();
+    await tick();
+    expect(stt.sessions).toHaveLength(1);
+    expect(errors(messages)).toHaveLength(1);
+    await orch.stop();
   });
 });
