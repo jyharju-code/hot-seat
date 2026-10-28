@@ -10,6 +10,7 @@ import {
   type ScenarioPreset,
 } from "@hot-seat/shared";
 import { Session, type CameraStill } from "./Session.js";
+import { NewsPlayer } from "./NewsPlayer.js";
 
 type LoadState =
   | { kind: "loading" }
@@ -424,6 +425,15 @@ function DebriefView({
         <p className="muted">Printing tomorrow&apos;s paper.</p>
       ) : (
         <p className="muted">Tomorrow&apos;s front page could not be made this time.</p>
+      )}
+
+      {debrief.news && sessionId && (
+        <NewsPlayer
+          sessionId={sessionId}
+          news={debrief.news}
+          scenario={scenario}
+          fallbackStillUrl={frontPage ? `data:${frontPage.mime};base64,${frontPage.imageBase64}` : null}
+        />
       )}
 
       <p>

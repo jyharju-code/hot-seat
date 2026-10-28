@@ -104,3 +104,7 @@ main { padding: 48px 32px; max-width: 1100px; }
 .briefing h3 { margin:20px 0 8px; font-size:18px; }
 .front-page { margin:48px 0; max-width:900px; background:var(--paper); padding:16px; }
 .front-page img { display:block; width:100%; height:auto; }
+.news-player { max-width:900px; margin:48px 0; }
+.news-player h2 { font-size:32px; margin-bottom:16px; }
+.news-frame { aspect-ratio:16/9; background:#101418; }
+.news-canvas { display:block; width:100%; height:auto; }
