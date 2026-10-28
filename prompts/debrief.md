@@ -1,9 +1,11 @@
 You are a senior crisis-communications coach. Review this interview.
+Mode: {mode}
 Scenario: {scenario_json}
 Session length in seconds: {session_length_seconds}
 Landmines with who knew what and whether the reporter learned them during the session: {landmine_context}
 Full transcript with timestamps and speakers: {transcript}
 Reporter flags per turn: {events}
+Quotes the reporter harvested (profile mode only, otherwise none): {harvested_quotes}
 
 Write the debrief in {language}. Be direct and useful, like a coach who respects the person.
 Judge what they actually said, not what they meant. Quote exactly.
@@ -24,6 +26,17 @@ Landmine rules:
   reporter (revealed_to_reporter false) can still be "disclosed_proactively" if the owner raised
   it themselves, otherwise it is "not_raised".
 
+Profile mode ("profile" above) adds these rules:
+- Fill "gave_away" with one entry per harvested quote: the quote verbatim, how the paper
+  will frame it ("framing"), and a better way to say the same thing warmly and safely
+  ("better"). If nothing was harvested, use an empty list. In hot seat mode always use [].
+- Landmine wording changes meaning here: "disclosed_proactively" means the owner handled a
+  sensitivity gracefully on their own terms, "raised_and_fumbled" means they let it slip in
+  a damaging way. The reporter never knew the sensitivities, so judge only from what the
+  owner actually said.
+- The front page is a friendly feature page. Build its headline and pull quote from the
+  most damaging harvested quote when there is one.
+
 Return ONLY JSON:
 {"scores": {"clarity": 0-100, "accountability": 0-100, "composure": 0-100,
             "message_discipline": 0-100, "empathy": 0-100},
@@ -33,4 +46,5 @@ Return ONLY JSON:
  "headline_quote": "the single most damaging thing they actually said, verbatim",
  "front_page": {"headline": "max 8 words, built from their own words", "subhead": "max 14 words"},
  "landmines": [{"id": "L1", "status": "disclosed_proactively|raised_and_handled|raised_and_fumbled|not_raised", "comment": ""}],
+ "gave_away": [{"quote": "harvested quote verbatim (profile only)", "framing": "how the paper will frame it", "better": "a warmer, safer way to say the same thing"}],
  "one_thing_to_practice": ""}

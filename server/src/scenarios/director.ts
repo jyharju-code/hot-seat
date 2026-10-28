@@ -1,14 +1,31 @@
-import { generatedScenarioSchema, type GeneratedScenario } from "@hot-seat/shared";
+import { generatedScenarioSchema, type DurationMinutes, type GeneratedScenario } from "@hot-seat/shared";
 import { MIN_REASONING_MAX_TOKENS, type Llm } from "../providers/llm.js";
 import { fillTemplate, loadPrompt } from "../prompts.js";
 
-export type ScenarioGenerator = (description: string, language: string) => Promise<GeneratedScenario>;
+export type ScenarioMode = "hot_seat" | "profile";
+export interface ScenarioOptions {
+  mode?: ScenarioMode;
+  durationMinutes?: DurationMinutes;
+}
 
-/**
- * Crisis Director: builds a fictional scenario with Muse Wonder via the
- * structured method of the Llm port. The user description is the user
- * message (the prompt argument), never part of the system prompt.
- */
+export type ScenarioGenerator = (
+  description: string,
+  language?: string,
+  options?: ScenarioOptions,
+) => Promise<GeneratedScenario>;
+
+/** Force the profile invariants, whatever the model returned. */
+export function normalizeProfileScenario(scenario: GeneratedScenario, durationMinutes: DurationMinutes = 5): GeneratedScenario {
+  return {
+    ...scenario,
+    format: "profile",
+    duration_minutes: durationMinutes,
+    escalations: [],
+    landmines: scenario.landmines.slice(0, 3).map((m) => ({ ...m, owner_knows: true, who_knows: "none", reveal_after_seconds: 9999 })),
+    journalists: scenario.journalists.slice(0, 1).map((j) => ({ ...j, temperament: "human" as const })),
+  };
+}
+
 export class CrisisDirector {
   private readonly llm: Llm;
   private readonly model: string | undefined;
@@ -20,20 +37,22 @@ export class CrisisDirector {
     this.reasoningEffort = reasoningEffort;
   }
 
-  async generate(description: string, language = "en"): Promise<GeneratedScenario> {
+  async generate(description: string, language = "en", options: ScenarioOptions = {}): Promise<GeneratedScenario> {
+    const isProfile = options.mode === "profile";
+    const duration = options.durationMinutes ?? 5;
     const [template, spokenStyle] = await Promise.all([
-      loadPrompt("crisis-director.md"),
+      loadPrompt(isProfile ? "profile-director.md" : "crisis-director.md"),
       loadPrompt("spoken-style.md"),
     ]);
     const system = fillTemplate(template, { language, spoken_style: spokenStyle.trim() });
-    return this.llm.generateStructured({
+    const scenario = await this.llm.generateStructured({
       prompt: description,
       system,
-      // Large structured JSON plus reasoning: well above the minimum.
       maxTokens: Math.max(8000, MIN_REASONING_MAX_TOKENS),
       ...(this.model ? { model: this.model } : {}),
       ...(this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : {}),
       parse: (raw) => generatedScenarioSchema.parse(raw),
     });
+    return isProfile ? normalizeProfileScenario(scenario, duration) : scenario;
   }
 }

@@ -258,3 +258,42 @@ transfer, and the small-business gap itself is worth saying out loud.
 Tags such as `[Coombs 2007]` in `prompts/coach-knowledge.md` refer to the
 entries above by first author and year. The coach may cite a tag only when
 the entry above actually supports the rule it is attached to.
+
+## Profile interviews: rapport, flattery, and being on the record
+
+**Brimbal, L., Meissner, C. A., Kleinman, S. M., et al. (2021). Evaluating
+the Benefits of a Rapport-Based Approach to Investigative Interviews: A
+Training Study with Law Enforcement Investigators. *Law and Human Behavior*,
+45(1), 55 to 67.**
+DOI: [10.1037/lhb0000437](https://doi.org/10.1037/lhb0000437)
+(opened via Crossref record for this DOI and the publisher PDF copy found in
+search).
+
+This training study with law enforcement investigators evaluates a
+rapport-based approach to investigative interviews, in which a positive,
+friendly approach improved perceived rapport and thereby facilitated
+cooperation and disclosure. The authors discuss excluding tactics such as
+forms of emotion provocation, keeping the method to rapport building.
+Interview translation for the profile mode: warmth, compliments and a good
+listener are not decoration, they are the mechanism that makes a relaxed
+owner disclose more, which is exactly the risk the profile rehearsal teaches.
+
+**Canadian Journalism Foundation (n.d.). Interviewing etiquette: a refresher.**
+URL: [cjf-fjc.ca/interviewing-etiquette-refresher](https://cjf-fjc.ca/interviewing-etiquette-refresher/)
+(page opened).
+
+This journalism practice page advises reporters to build trust and rapport,
+and notes that the right amount of flattery, meaning acknowledgement of a
+person's accomplishments or struggles, can help gain a person's trust.
+Evidence note: practitioner guidance, not an experiment, so it is used as
+practice consensus for the flattery rule and marked as such in the coach
+knowledge. For the owner, the lesson is symmetrical: a compliment from a
+reporter is pleasant and also a tool, so answer the next question as if no
+compliment had been paid.
+
+On the remaining profile topics, no source was opened in this run that
+directly supports a rule: "everything is on the record" unless terms are
+agreed beforehand, the danger of speculating about other people, and the
+long silence as an invitation to keep talking. Those rules are therefore
+written in `prompts/coach-knowledge.md` as practice guidance and say so,
+rather than carrying a source tag they did not earn.

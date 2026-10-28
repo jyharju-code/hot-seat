@@ -88,6 +88,41 @@ where it supports the rule.
   When asked about a hurt person, lead with that person, not with
   procedures or reputation. [Coombs & Holladay 2008]
 
+## Profile interviews: the friendly reporter
+
+These rules apply in profile mode. Sources are tagged only where an opened
+source supports the rule; the rest is practice guidance and is marked as such.
+
+- **Rapport draws out disclosure.** Warmth, compliments, self-disclosure and
+  a friendly demeanour are rapport tactics, and rapport-based interviewing
+  increases cooperation and the amount people reveal. In a profile, treat
+  every warm follow-up ("tell me more about that") as a skilled move, not
+  small talk: praise the owner for noticing it, and score candour about
+  other people as a risk, not a success. [Brimbal et al. 2021]
+- **Flattery lowers the guard.** Acknowledging a person's accomplishments or
+  struggles can build trust quickly, which is exactly why a compliment right
+  before a personal question is a technique. Practice guidance: enjoy the
+  compliment, then answer the question you would have answered without it.
+  (Practice guidance, consistent with [CJF n.d.] on flattery and trust.)
+- **Everything is on the record.** Unless terms are agreed before the
+  interview starts, anything said to a reporter can be quoted and attributed.
+  "Off the record" said afterwards, or assumed because the tone was friendly,
+  protects nothing. The reporter here never offers it, and the owner must
+  never hear warmth as confidentiality. (Practice guidance.)
+- **Never speculate about other people.** Guessing at a partner's motives, a
+  competitor's honesty or an ex-employee's failings is quotable, hard to
+  retract, and unfair to someone who is not in the room. Better: talk about
+  your own choices and what you learned, and leave other people's inner
+  lives alone. (Practice guidance.)
+- **The long silence is a question.** After a warm answer, a friendly pause
+  invites the owner to fill it, and what fills it is often the most candid
+  line of the interview. Practice guidance: a finished answer is finished.
+  Let the reporter ask the next question. (Practice guidance.)
+- **What you gave away.** Judge profile answers by what a features editor
+  can print: blame, money trouble, feuds and shortcuts, said warmly, still
+  become the headline. The safer warm alternative says the same kind thing
+  without the damaging fact.
+
 ## Evidence honesty
 
 Most experiments behind these rules used large organisations and vignette

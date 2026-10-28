@@ -35,3 +35,11 @@ repository README; no code came with them.
   `{paper_style}`, `{fictional_paper_name}`, `{tomorrow}`, `{headline}`,
   `{subhead}`, `{company_name}`, `{crisis_summary}`, `{key_facts}` and
   `{quotes}` at runtime.
+- `profile-director.md`: builds a friendly profile scenario (occasion, 3
+  owner-known sensitivities the reporter does not know). Fill `{language}`
+  and `{spoken_style}` at runtime.
+- `profile-journalist-turn.md`: one warm profile reporter turn with hidden
+  `quote_harvest` and `angle`. Fill `{name}`, `{outlet}`, `{temperament}`,
+  `{agenda}`, `{public_facts}`, `{elapsed_seconds}`, `{duration_seconds}`,
+  `{transcript_tail}`, `{your_recent_lines}`, `{last_answer}` and
+  `{spoken_style}` at runtime.

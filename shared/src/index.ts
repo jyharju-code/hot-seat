@@ -74,6 +74,10 @@ export const reporterLineSchema = z.object({
   quote_used: z.string().nullable(),
   /** Semantic end-of-turn judgement for the owner answer this replies to. */
   owner_done: z.boolean().optional(),
+  /** Profile mode only, hidden from UI: owner's exact words worth printing, or null. */
+  quote_harvest: z.string().nullable().optional(),
+  /** Profile mode only, hidden from UI: story angle the reporter is quietly building. */
+  angle: z.string().nullable().optional(),
 });
 export type ReporterLine = z.infer<typeof reporterLineSchema>;
 
@@ -126,6 +130,7 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("news_flash"), text: z.string(), atSeconds: z.number().nonnegative() }),
   z.object({ type: z.literal("interrupt"), say: z.string() }),
   z.object({ type: z.literal("reporter_line"), line: reporterLineSchema }),
+  z.object({ type: z.literal("session_complete"), message: z.string() }),
   z.object({ type: z.literal("audio_end") }),
   z.object({ type: z.literal("timing"), timing: turnTimingSchema }),
   z.object({ type: z.literal("error"), message: z.string() }),
@@ -171,8 +176,15 @@ export const escalationSchema = z.object({
 });
 export type Escalation = z.infer<typeof escalationSchema>;
 
+export const scenarioFormatSchema = z.enum(["interview", "press_conference", "profile"]);
+export type ScenarioFormat = z.infer<typeof scenarioFormatSchema>;
+export const durationMinutesSchema = z.union([z.literal(5), z.literal(10)]);
+export type DurationMinutes = z.infer<typeof durationMinutesSchema>;
+
 export const generatedScenarioSchema = z.object({
-  format: z.enum(["interview", "press_conference"]),
+  format: scenarioFormatSchema,
+  /** Profile session length. Defaults to 5 so old stored scenarios still load. */
+  duration_minutes: durationMinutesSchema.default(5),
   fictionalized_from: z.string().nullable(),
   company: z.object({
     name: z.string().min(1),
@@ -200,6 +212,38 @@ export interface ScenarioPreset {
   id: string;
   label: string;
   description: string;
+  /** Which rehearsal this preset belongs to. Absent means hot seat (crisis). */
+  mode?: "hot_seat" | "profile";
+}
+
+export function isProfileScenario(scenario: GeneratedScenario): boolean {
+  return scenario.format === "profile";
+}
+
+/** Planned session length in seconds (profile: duration_minutes; crisis: no fixed length). */
+export function sessionDurationSeconds(scenario: GeneratedScenario): number {
+  return isProfileScenario(scenario) ? scenario.duration_minutes * 60 : 0;
+}
+
+export const PROFILE_WRAP_UP_SECONDS = 45;
+
+/** Profile pacing phase for an elapsed time. */
+export function profilePhase(
+  elapsedSeconds: number,
+  durationSeconds: number,
+): "running" | "wrapping_up" | "complete" {
+  if (durationSeconds <= 0) return "running";
+  if (elapsedSeconds >= durationSeconds) return "complete";
+  if (elapsedSeconds >= durationSeconds - PROFILE_WRAP_UP_SECONDS) return "wrapping_up";
+  return "running";
+}
+
+export function shouldWrapUp(elapsedSeconds: number, durationSeconds: number): boolean {
+  return profilePhase(elapsedSeconds, durationSeconds) === "wrapping_up";
+}
+
+export function isSessionComplete(elapsedSeconds: number, durationSeconds: number): boolean {
+  return profilePhase(elapsedSeconds, durationSeconds) === "complete";
 }
 
 export interface CreateScenarioResponse {
@@ -283,6 +327,10 @@ export const debriefSchema = z.object({
   headline_quote: z.string(),
   front_page: z.object({ headline: z.string().min(1), subhead: z.string() }),
   landmines: z.array(debriefLandmineSchema),
+  /** Profile only: harvested quotes, how the paper frames each, and a safer warm alternative. Old debriefs omit it. */
+  gave_away: z
+    .array(z.object({ quote: z.string(), framing: z.string(), better: z.string() }))
+    .optional(),
   one_thing_to_practice: z.string(),
 });
 export type Debrief = z.infer<typeof debriefSchema>;

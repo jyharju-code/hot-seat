@@ -3,6 +3,7 @@ import type { GeneratedScenario } from "@hot-seat/shared";
 /** The café in the generated-scenario shape. Test fixture only (Brief 03). */
 export const cafeTestScenario: GeneratedScenario = {
   format: "interview",
+  duration_minutes: 5,
   fictionalized_from: null,
   company: { name: "Kettle & Crumb", industry: "café", city: "Riverside", size: "6 staff" },
   spokesperson_role: "owner",
@@ -87,4 +88,52 @@ export const cafeScenario: DemoScenario = {
     agenda: "find out whether the café knew about the broken display case before the incident",
     voiceRole: "relentless",
   },
+};
+
+/** Friendly profile fixture (Brief 13). Test fixture only. */
+export const cafeProfileScenario: GeneratedScenario = {
+  format: "profile",
+  duration_minutes: 5,
+  fictionalized_from: null,
+  company: { name: "Kettle & Crumb", industry: "café", city: "Riverside", size: "6 staff" },
+  spokesperson_role: "owner",
+  crisis: {
+    headline: "Ten years of Kettle & Crumb",
+    summary: "The neighbourhood café reaches its tenth anniversary and the local paper is writing a warm feature on the owner and the café.",
+    timeline: ["The café opened ten years ago", "It survived two hard winters", "The anniversary party is next week"],
+    stakes: "A careless quote about people or money could become the headline of an otherwise warm feature",
+  },
+  briefing_for_user: [
+    "Kettle & Crumb opened ten years ago this month and the anniversary party is next week",
+    "The Riverside Courier is writing a warm feature about you and the café",
+    "You started the café after leaving a bakery job you loved",
+    "The café now employs 6 staff and is known for its cinnamon buns",
+    "The last two winters were quieter, and this spring has been the busiest yet",
+    "Regulars have been coming since the first year and several will be at the party",
+    "You hope to open a second small counter at the market hall next year",
+  ],
+  public_facts: [
+    "Kettle & Crumb is ten years old this month",
+    "The café employs 6 staff",
+    "The anniversary party is next week",
+    "The café is known for its cinnamon buns",
+  ],
+  landmines: [
+    { id: "L1", fact: "You fell out with your first partner over money and you still think he nearly killed this place", who_knows: "none", reveal_after_seconds: 9999, owner_knows: true },
+    { id: "L2", fact: "You quietly blame your flour supplier for the bad winter and have never told them", who_knows: "none", reveal_after_seconds: 9999, owner_knows: true },
+    { id: "L3", fact: "You are proud that you once cut corners on the old oven checks to save money", who_knows: "none", reveal_after_seconds: 9999, owner_knows: true },
+  ],
+  journalists: [
+    {
+      id: "J1",
+      name: "Matilda",
+      outlet: "The Riverside Courier",
+      temperament: "human",
+      voice: "female",
+      agenda: "write a warm anniversary feature and draw out the candid story behind the café",
+      opening_question: "[warmly] Matilda, from the Courier. Ten years! Take me back to the very first morning you opened.",
+    },
+  ],
+  escalations: [],
+  good_answer_shape: "Tell the story proudly and warmly, keep other people's business private, name no blame, speculate about nobody",
 };
