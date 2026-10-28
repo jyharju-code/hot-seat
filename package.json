@@ -17,7 +17,8 @@
     "smoke:scenario": "npm run smoke:scenario -w @hot-seat/server",
     "smoke:latency": "npm run smoke:latency -w @hot-seat/server",
     "smoke:scenario-speed": "npm run smoke:scenario-speed -w @hot-seat/server",
-    "smoke:browserlike": "npm run smoke:browserlike -w @hot-seat/server"
+    "smoke:browserlike": "npm run smoke:browserlike -w @hot-seat/server",
+    "smoke:debrief": "npm run smoke:debrief -w @hot-seat/server"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

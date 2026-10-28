@@ -12,6 +12,7 @@ import { JournalistBrain, loadJournalistPrompts, primaryJournalist } from "./jou
 import { BasetenLlm, ElevenLabsTextToSpeech, MetaLlm, MuseSpeechToText } from "./providers/index.js";
 import { requireScenario, scenarioStore } from "./scenarios/store.js";
 import { SessionOrchestrator } from "./session/orchestrator.js";
+import { sessionStore } from "./session/store.js";
 import { voiceFor } from "./voices.js";
 
 const config = loadConfig();
@@ -75,6 +76,7 @@ wss.on("connection", (ws: WebSocket) => {
           } else {
             llm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel });
           }
+          const record = sessionStore.start(scenarioId, scenario, Date.now());
           const brain = new JournalistBrain(llm, prompts, turnModel);
           const voice = voiceFor(journalist.temperament, journalist.voice);
           orchestrator = new SessionOrchestrator({
@@ -91,6 +93,7 @@ wss.on("connection", (ws: WebSocket) => {
               },
             },
             scenario,
+            record,
             voiceId: voice.voiceId,
             turnEndSilenceMs: config.TURN_END_SILENCE_MS,
             log: (line) => app.log.info(line),

@@ -16,5 +16,12 @@ export {
   type TextToSpeech,
   type TextToSpeechOptions,
 } from "./text-to-speech.js";
-export { StubImageGen, type ImageGen, type ImageEditInput, type ImageResult } from "./image-gen.js";
+export {
+  MetaImageGen,
+  StubImageGen,
+  type ImageGen,
+  type ImageEditInput,
+  type ImageResult,
+  type MetaImageGenOptions,
+} from "./image-gen.js";
 export { NotImplementedError } from "./errors.js";

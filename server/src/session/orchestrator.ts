@@ -1,7 +1,8 @@
-import { stripAudioTags, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
+import { stripAudioTags, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
 import type { JournalistBrain, ConversationTurn, BrainScenario } from "../journalist.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
+import type { SessionRecord } from "./store.js";
 
 export interface ClientSink {
   send(message: ServerMessage): void;
@@ -23,6 +24,8 @@ export interface OrchestratorDeps {
   keepAliveIntervalMs?: number;
   now?: () => number;
   log?: (line: string) => void;
+  /** When set, every turn is recorded with its timestamp and flags for the debrief. */
+  record?: SessionRecord;
 }
 
 export const DEFAULT_TURN_END_SILENCE_MS = 1500;
@@ -79,6 +82,12 @@ export class SessionOrchestrator {
       const line = await this.deps.brain.openingQuestion(this.deps.scenario);
       const timing = await this.speak(line, t0, t0, t0);
       this.history.push({ role: "reporter", text: line.say });
+      this.deps.record?.turns.push({
+        role: "reporter",
+        text: stripAudioTags(line.say),
+        elapsedSeconds: 0,
+        flags: [...line.flags],
+      });
       this.deps.sink.send({ type: "timing", timing });
     } catch (err) {
       this.fail(err);
@@ -300,6 +309,13 @@ export class SessionOrchestrator {
     const userText = text.trim();
     this.deps.sink.send({ type: "transcript", role: "user", text: userText });
     this.history.push({ role: "user", text: userText });
+    const userTurn: { role: "user"; text: string; elapsedSeconds: number; flags: ReporterFlag[] } = {
+      role: "user",
+      text: userText,
+      elapsedSeconds: this.elapsedSeconds(),
+      flags: [],
+    };
+    this.deps.record?.turns.push(userTurn);
     this.setState("thinking");
     let line: ReporterLine;
     try {
@@ -318,6 +334,13 @@ export class SessionOrchestrator {
       return;
     }
     const llmAt = this.now();
+    userTurn.flags = [...line.flags];
+    this.deps.record?.turns.push({
+      role: "reporter",
+      text: stripAudioTags(line.say),
+      elapsedSeconds: this.elapsedSeconds(),
+      flags: [...line.flags],
+    });
     this.history.push({ role: "reporter", text: line.say });
     let timing: TurnTiming;
     try {
