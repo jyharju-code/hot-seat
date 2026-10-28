@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "smoke:voice": "node --import tsx scripts/smoke-voice.ts"
+    "smoke:voice": "node --import tsx scripts/smoke-voice.ts",
+    "smoke:scenario": "node --import tsx scripts/smoke-scenario.ts"
   },
   "dependencies": {
     "@hot-seat/shared": "*",
