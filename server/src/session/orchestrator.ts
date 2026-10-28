@@ -4,6 +4,13 @@ import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
+import {
+  KEEPALIVE_DEFICIT_MS,
+  KEEPALIVE_INTERVAL_MS,
+  KEEPALIVE_MAX_TOPUP_MS,
+  SttKeepAliveTracker,
+  silenceBytesForMs,
+} from "./stt-keepalive.js";
 
 export interface ClientSink {
   send(message: ServerMessage): void;
@@ -19,12 +26,16 @@ export interface OrchestratorDeps {
   voiceId: string;
   /** Silence after the last final/partial before the turn ends. Default 1500. */
   turnEndSilenceMs?: number;
-  /** Idle time before the server pushes silence to an open STT session. Default 300. */
-  keepAliveIdleMs?: number;
-  /** How often the keep-alive checks for idle STT ingress. Default 100. */
+  /** Deficit (audio sent vs wall time) that triggers a silence top-up. Default 150. */
+  keepAliveDeficitMs?: number;
+  /** Cap on a single silence top-up. Default 1000. */
+  keepAliveMaxTopUpMs?: number;
+  /** How often the keep-alive checks the STT deficit. Default 100. */
   keepAliveIntervalMs?: number;
   now?: () => number;
   log?: (line: string) => void;
+  /** Debug-level log (keep-alive top-ups). */
+  debugLog?: (line: string) => void;
   /** When set, every turn is recorded with its timestamp and flags for the debrief. */
   record?: SessionRecord;
   /** Multiplier for escalation at_seconds (smoke only, outside production). Default 1. */
@@ -54,8 +65,9 @@ export const NEWS_VOICE_ID = "3WqHLnw80rOZqJzW9YRB";
 export const NEWS_TTS_MODEL = "eleven_v4_turbo";
 
 export const DEFAULT_TURN_END_SILENCE_MS = 1500;
-export const STT_KEEPALIVE_IDLE_MS = 300;
-export const STT_KEEPALIVE_INTERVAL_MS = 100;
+export const STT_KEEPALIVE_DEFICIT_MS = KEEPALIVE_DEFICIT_MS;
+export const STT_KEEPALIVE_INTERVAL_MS = KEEPALIVE_INTERVAL_MS;
+export const STT_KEEPALIVE_MAX_TOPUP_MS = KEEPALIVE_MAX_TOPUP_MS;
 /** 100 ms of PCM16 at 16 kHz. */
 export const STT_SILENCE_FRAME_BYTES = 3200;
 /** Consecutive STT failures in one turn before the user sees an error. */
@@ -72,7 +84,7 @@ export const INTERRUPT_TTS_MODEL = "eleven_v4_turbo";
 /**
  * Half-duplex voice loop: thinking -> speaking -> (playback_done) listening.
  * The STT session opens only when the client reports playback finished, and
- * is never left without audio: silence is pushed after 300 ms idle.
+ * is never left behind real time: silence tops up the audio deficit.
  */
 export class SessionOrchestrator {
   private readonly deps: OrchestratorDeps;
@@ -88,7 +100,7 @@ export class SessionOrchestrator {
   private startedAt: number | null = null;
   private speculative: { answer: string; controller: AbortController; promise: Promise<ReporterLine> } | null = null;
   private awaitingPlayback = false;
-  private lastAudioAt = 0;
+  private keepAlive: SttKeepAliveTracker | null = null;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private readonly firedEscalations = new Set<number>();
   private readonly learnedEscalations: Escalation[] = [];
@@ -225,7 +237,7 @@ export class SessionOrchestrator {
   /** Forward one mic frame. Dropped unless listening (half duplex). */
   pushAudio(pcm: Uint8Array): void {
     if (this.state !== "listening" || !this.sttSession) return;
-    this.lastAudioAt = this.now();
+    this.keepAlive?.noteFrame(pcm.length);
     this.sttSession.push(pcm);
   }
 
@@ -257,18 +269,23 @@ export class SessionOrchestrator {
 
   private startKeepAlive(): void {
     this.stopKeepAlive();
-    this.lastAudioAt = this.now();
-    const idleMs = this.deps.keepAliveIdleMs ?? STT_KEEPALIVE_IDLE_MS;
-    const intervalMs = this.deps.keepAliveIntervalMs ?? STT_KEEPALIVE_INTERVAL_MS;
+    const tracker = new SttKeepAliveTracker(
+      this.now(),
+      this.deps.keepAliveDeficitMs ?? KEEPALIVE_DEFICIT_MS,
+      this.deps.keepAliveMaxTopUpMs ?? KEEPALIVE_MAX_TOPUP_MS,
+    );
+    this.keepAlive = tracker;
+    const intervalMs = this.deps.keepAliveIntervalMs ?? KEEPALIVE_INTERVAL_MS;
     this.keepAliveTimer = setInterval(() => {
       if (this.stopped || this.state !== "listening" || !this.sttSession) return;
-      if (this.now() - this.lastAudioAt < idleMs) return;
+      const topUpMs = tracker.topUp(this.now());
+      if (topUpMs <= 0) return;
       try {
-        this.sttSession.push(new Uint8Array(STT_SILENCE_FRAME_BYTES));
+        this.sttSession.push(new Uint8Array(silenceBytesForMs(topUpMs)));
+        this.deps.debugLog?.(`[stt] keep-alive top-up ${topUpMs}ms silence`);
       } catch {
         /* session teardown handles failures */
       }
-      this.lastAudioAt = this.now();
     }, intervalMs);
     (this.keepAliveTimer as { unref?: () => void }).unref?.();
   }
@@ -276,6 +293,7 @@ export class SessionOrchestrator {
   private stopKeepAlive(): void {
     if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
     this.keepAliveTimer = null;
+    this.keepAlive = null;
   }
 
   private teardownStt(endStream = false): void {

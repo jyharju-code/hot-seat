@@ -550,9 +550,12 @@ describe("Realtime ingress (brief 05a, gap-sensitive fake STT)", () => {
       expect(orch.currentState).toBe("listening");
       expect(session.pushed.length).toBeGreaterThan(0);
       for (const frame of session.pushed) {
-        expect(frame).toHaveLength(3200);
         expect(frame.every((b) => b === 0)).toBe(true);
       }
+      // Top-ups track wall time: about 3 s of audio was sent in 3 s.
+      const totalMs = session.pushed.reduce((sum, f) => sum + f.length / 32, 0);
+      expect(totalMs).toBeGreaterThan(2800);
+      expect(totalMs).toBeLessThan(3200);
       await orch.stop();
     } finally {
       vi.useRealTimers();
