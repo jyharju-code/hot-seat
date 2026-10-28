@@ -89,7 +89,7 @@ function makeOrch(extra: Record<string, unknown> = {}) {
     nextTurn: async () => ({ move: "follow_up", flags: [], say: "Next?", quote_used: null }) as ReporterLine,
   };
   const orch = new SessionOrchestrator({
-    stt, brain: brain as never, tts, sink, scenario: cafeScenario, voiceId: "v1", turnEndSilenceMs: 0, ...extra,
+    stt, brain: brain as never, tts, sink, scenario: cafeScenario, voiceId: "v1", turnEndSilenceMs: 0, turnEndHesitantMs: 0, ...extra,
   } as never);
   return { stt, tts, messages, orch };
 }
@@ -202,7 +202,7 @@ describe("stop() cancels in-flight work (brief 08 item 4)", () => {
       nextTurn: async (...args: unknown[]) => { turnSignal = args[4] as AbortSignal; return gate; },
     };
     const orch = new SessionOrchestrator({
-      stt, brain: brain as never, tts, sink, scenario: cafeScenario, voiceId: "v1", turnEndSilenceMs: 0,
+      stt, brain: brain as never, tts, sink, scenario: cafeScenario, voiceId: "v1", turnEndSilenceMs: 0, turnEndHesitantMs: 0,
     });
     await orch.start();
     // Opening TTS received a signal.

@@ -80,6 +80,7 @@ wss.on("connection", (ws: WebSocket) => {
         ...(escalationScale !== undefined ? { escalationScale } : {}),
         voiceId: voice.voiceId,
         turnEndSilenceMs: config.TURN_END_SILENCE_MS,
+        turnEndHesitantMs: config.TURN_END_HESITANT_MS,
         listenIdleMs: config.LISTEN_IDLE_MS,
         maxSessionMs: config.MAX_SESSION_MS,
         onSessionEnded: () => {

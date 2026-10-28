@@ -163,7 +163,7 @@ describe("JournalistBrain", () => {
 });
 
 describe("SessionOrchestrator (fake adapters)", () => {
-  async function started(brainOverride?: { nextTurn?: (scenario: unknown, history: unknown, answer: string) => Promise<ReporterLine>; turnEndSilenceMs?: number }) {
+  async function started(brainOverride?: { nextTurn?: (scenario: unknown, history: unknown, answer: string) => Promise<ReporterLine>; turnEndSilenceMs?: number; turnEndHesitantMs?: number }) {
     const stt = new FakeStt();
     const tts = new FakeTts();
     const { messages, audio, sink } = makeSink();
@@ -184,6 +184,7 @@ describe("SessionOrchestrator (fake adapters)", () => {
       scenario: cafeScenario,
       voiceId: "voice-1",
       turnEndSilenceMs: brainOverride?.turnEndSilenceMs ?? 0,
+      turnEndHesitantMs: brainOverride?.turnEndHesitantMs ?? brainOverride?.turnEndSilenceMs ?? 0,
       log: (l) => logs.push(l),
     });
     await orch.start();
@@ -285,6 +286,61 @@ describe("SessionOrchestrator (fake adapters)", () => {
     }
   });
 
+  it("hesitant answer gets the extended window; speculative call still starts at the first final", async () => {
+    vi.useFakeTimers();
+    try {
+      const { stt, messages, brainCalls, orch } = await started({ turnEndSilenceMs: 1500, turnEndHesitantMs: 3200 });
+      const s = stt.sessions[0]!;
+      s.emit({ type: "final", text: "well, so the thing is I, let me think." });
+      await vi.advanceTimersByTimeAsync(0);
+      // Speculative LLM call started at the first final, not after the window.
+      expect(brainCalls).toEqual(["well, so the thing is I, let me think."]);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+      expect(orch.currentState).toBe("listening");
+      await vi.advanceTimersByTimeAsync(1699);
+      expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(messages).toContainEqual({
+        type: "transcript",
+        role: "user",
+        text: "well, so the thing is I, let me think.",
+      });
+      // The speculative result was reused: no second LLM call at window close.
+      expect(brainCalls).toHaveLength(1);
+      await orch.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("complete answer still ends at the default window, and continued speech aborts speculative", async () => {
+    vi.useFakeTimers();
+    try {
+      const { stt, messages, brainCalls, orch } = await started({ turnEndSilenceMs: 1500, turnEndHesitantMs: 3200 });
+      const s = stt.sessions[0]!;
+      const complete = "We closed the cafe that morning and told every customer directly today.";
+      s.emit({ type: "final", text: complete });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(brainCalls).toEqual([complete]);
+      // More speech arrives inside the window: speculative is aborted and
+      // the turn continues instead of speaking the shorter reply.
+      s.emit({ type: "final", text: "And we refunded everyone." });
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(messages).toContainEqual({
+        type: "transcript",
+        role: "user",
+        text: `${complete} And we refunded everyone.`,
+      });
+      expect(brainCalls).toEqual([complete, `${complete} And we refunded everyone.`]);
+      await orch.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores empty and whitespace-only finals (no LLM call, no turn)", async () => {
     vi.useFakeTimers();
     try {
@@ -377,7 +433,7 @@ describe("Speculative turn (fake STT + fake LLM counting calls and aborts)", () 
       sink,
       scenario: cafeTestScenario,
       voiceId: "voice-1",
-      turnEndSilenceMs: 100,
+      turnEndSilenceMs: 100, turnEndHesitantMs: 100,
     });
     await orch.start();
     await orch.playbackDone();
@@ -511,7 +567,7 @@ describe("Realtime ingress (brief 05a, gap-sensitive fake STT)", () => {
       sink,
       scenario: cafeScenario,
       voiceId: "voice-1",
-      turnEndSilenceMs: opts.turnEndSilenceMs ?? 50,
+      turnEndSilenceMs: opts.turnEndSilenceMs ?? 50, turnEndHesitantMs: opts.turnEndSilenceMs ?? 50,
       now: () => Date.now(),
       log: (l) => logs.push(l),
     });
@@ -630,7 +686,7 @@ describe("Escalations (brief 06)", () => {
     let nowMs = 0;
     const orch = new SessionOrchestrator({
       stt, brain, tts, sink, scenario, voiceId: "voice-1",
-      turnEndSilenceMs: 0, now: () => nowMs, record,
+      turnEndSilenceMs: 0, turnEndHesitantMs: 0, now: () => nowMs, record,
     });
     await orch.start();
     await orch.playbackDone();
@@ -711,7 +767,7 @@ describe("Interruptions (brief 07)", () => {
     const brain = { openingQuestion: async () => OPENING, nextTurn: async () => parseReporterLine(VALID) };
     const orch = new SessionOrchestrator({
       stt, brain: brain as never, tts, sink, scenario: cafeScenario, voiceId: "voice-1",
-      turnEndSilenceMs: 20, now: () => nowMs, log: (l) => logs.push(l), record,
+      turnEndSilenceMs: 20, turnEndHesitantMs: 20, now: () => nowMs, log: (l) => logs.push(l), record,
       interruptDecider: decider, interruptsEnabled: opts.enabled ?? true,
     });
     await orch.start();

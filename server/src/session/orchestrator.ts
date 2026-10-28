@@ -4,6 +4,7 @@ import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
+import { TURN_END_HESITANT_MS, TURN_END_SILENCE_MS, turnEndSilenceMs } from "./turn-end.js";
 import {
   KEEPALIVE_DEFICIT_MS,
   KEEPALIVE_INTERVAL_MS,
@@ -26,6 +27,8 @@ export interface OrchestratorDeps {
   voiceId: string;
   /** Silence after the last final/partial before the turn ends. Default 1500. */
   turnEndSilenceMs?: number;
+  /** Extended silence when the answer looks unfinished. Default 3200. */
+  turnEndHesitantMs?: number;
   /** Deficit (audio sent vs wall time) that triggers a silence top-up. Default 150. */
   keepAliveDeficitMs?: number;
   /** Cap on a single silence top-up. Default 1000. */
@@ -64,7 +67,8 @@ export interface OrchestratorDeps {
 export const NEWS_VOICE_ID = "3WqHLnw80rOZqJzW9YRB";
 export const NEWS_TTS_MODEL = "eleven_v4_turbo";
 
-export const DEFAULT_TURN_END_SILENCE_MS = 1500;
+export const DEFAULT_TURN_END_SILENCE_MS = TURN_END_SILENCE_MS;
+export const DEFAULT_TURN_END_HESITANT_MS = TURN_END_HESITANT_MS;
 export const STT_KEEPALIVE_DEFICIT_MS = KEEPALIVE_DEFICIT_MS;
 export const STT_KEEPALIVE_INTERVAL_MS = KEEPALIVE_INTERVAL_MS;
 export const STT_KEEPALIVE_MAX_TOPUP_MS = KEEPALIVE_MAX_TOPUP_MS;
@@ -351,6 +355,7 @@ export class SessionOrchestrator {
 
   private async consumeStt(): Promise<void> {
     const silenceMs = this.deps.turnEndSilenceMs ?? DEFAULT_TURN_END_SILENCE_MS;
+    const hesitantMs = this.deps.turnEndHesitantMs ?? DEFAULT_TURN_END_HESITANT_MS;
     const parts: string[] = [];
     let lastFinalAt: number | null = null;
     let lastEndpointAt: number | null = null;
@@ -432,10 +437,12 @@ export class SessionOrchestrator {
         } else {
           const TIMEOUT = Symbol("silence");
           let timer: ReturnType<typeof setTimeout> | undefined;
+          const answerSoFar = [...parts, ...(pendingPartial ? [pendingPartial] : [])].join(" ");
+          const windowMs = turnEndSilenceMs(answerSoFar, { silenceMs, hesitantMs });
           const raced = await Promise.race([
             nextP,
             new Promise<typeof TIMEOUT>((resolve) => {
-              timer = setTimeout(() => resolve(TIMEOUT), silenceMs);
+              timer = setTimeout(() => resolve(TIMEOUT), windowMs);
             }),
           ]);
           if (timer) clearTimeout(timer);

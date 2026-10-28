@@ -75,7 +75,7 @@ describe("reasoning model token budgets", () => {
     const orch = new SessionOrchestrator({
       stt, brain: new JournalistBrain(specLlm, PROMPTS), tts: new FakeTts(),
       sink: { send: () => {}, sendAudio: () => {} },
-      scenario: cafeTestScenario, voiceId: "voice-1", turnEndSilenceMs: 100,
+      scenario: cafeTestScenario, voiceId: "voice-1", turnEndSilenceMs: 100, turnEndHesitantMs: 100,
     });
     await orch.start();
     await orch.playbackDone();
