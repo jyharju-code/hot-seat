@@ -1,4 +1,4 @@
-import type { Llm, LlmChatInput, LlmChatResult, LlmStructuredInput } from "./llm.js";
+import { describeEmptyContent, type Llm, type LlmChatInput, type LlmChatResult, type LlmStructuredInput, type LlmUsage } from "./llm.js";
 
 export interface MetaLlmOptions {
   apiKey: string;
@@ -11,10 +11,14 @@ export interface MetaLlmOptions {
 interface ChatCompletionResponse {
   model?: string;
   choices?: Array<{ message?: { content?: string }; finish_reason?: string | null }>;
+  usage?: LlmUsage;
 }
 
 interface ResponsesResponse {
   output_text?: string;
+  status?: string;
+  incomplete_details?: { reason?: string };
+  usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number; output_tokens_details?: { reasoning_tokens?: number } };
   output?: Array<{ content?: Array<{ text?: string; type?: string }> }>;
 }
 
@@ -56,7 +60,8 @@ export class MetaLlm implements Llm {
     const data = (await res.json()) as ChatCompletionResponse;
     const choice = data.choices?.[0];
     const text = choice?.message?.content;
-    if (typeof text !== "string") throw new Error("Meta Model API chat returned no message content");
+    if (typeof text !== "string" || text.trim() === "")
+      throw new Error(`Meta Model API chat returned no message content: ${describeEmptyContent(choice?.finish_reason, data.usage)}`);
     return { text, model: data.model ?? model, finishReason: choice?.finish_reason ?? null };
   }
 
@@ -70,6 +75,7 @@ export class MetaLlm implements Llm {
         model,
         ...(input.system ? { instructions: input.system } : {}),
         ...(input.reasoningEffort !== undefined ? { reasoning: { effort: input.reasoningEffort } } : {}),
+        ...(input.maxTokens !== undefined ? { max_output_tokens: input.maxTokens } : {}),
         input: `${input.prompt}\n\nRespond with JSON only, no prose.`,
         text: { format: { type: "json_object" } },
       }),
@@ -77,7 +83,15 @@ export class MetaLlm implements Llm {
     if (!res.ok) throw new Error(`Meta Model API responses failed: ${res.status} ${await safeText(res)}`);
     const data = (await res.json()) as ResponsesResponse;
     const rawText = data.output_text ?? data.output?.flatMap((o) => o.content ?? []).find((c) => typeof c.text === "string")?.text;
-    if (!rawText) throw new Error("Meta Model API responses returned no output text");
+    if (!rawText)
+      throw new Error(
+        `Meta Model API responses returned no output text: ${describeEmptyContent(data.incomplete_details?.reason ?? data.status, {
+          prompt_tokens: data.usage?.input_tokens,
+          completion_tokens: data.usage?.output_tokens,
+          total_tokens: data.usage?.total_tokens,
+          completion_tokens_details: { reasoning_tokens: data.usage?.output_tokens_details?.reasoning_tokens },
+        })}`,
+      );
     let parsed: unknown;
     try {
       parsed = JSON.parse(rawText);

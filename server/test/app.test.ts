@@ -97,6 +97,11 @@ describe("MetaLlm adapter (mocked fetch)", () => {
     await llm.chat({ messages: [{ role: "user", content: "Hi" }] });
     expect(bodyModel).toBe("muse-spark-1.3");
   });
+  it("chat with empty content reports finish_reason and usage", async () => {
+    const fetchFn = (async () => new Response(JSON.stringify({ model: "muse-spark-1.3", choices: [{ message: { content: "" }, finish_reason: "length" }], usage: { prompt_tokens: 10, completion_tokens: 200, total_tokens: 210, completion_tokens_details: { reasoning_tokens: 200 } } }), { status: 200 })) as typeof fetch;
+    const llm = new MetaLlm({ apiKey: "k", fetchFn });
+    await expect(llm.chat({ messages: [{ role: "user", content: "Hi" }], maxTokens: 200 })).rejects.toThrow(/empty content, finish_reason=length, reasoning_tokens=200/);
+  });
   it("generateStructured parses JSON from the Responses API", async () => {
     const fetchFn = (async () => new Response(JSON.stringify({ output_text: '{"title":"Crisis"}' }), { status: 200 })) as typeof fetch;
     const llm = new MetaLlm({ apiKey: "k", fetchFn });
@@ -126,6 +131,11 @@ describe("BasetenLlm adapter (mocked fetch)", () => {
     expect(bodyModel).toBe("meta-models/muse-spark-open-1026");
     expect(reasoning).toBe("minimal");
     expect(out.text).toBe("Hi.");
+  });
+  it("chat with empty content reports finish_reason and usage", async () => {
+    const fetchFn = (async () => new Response(JSON.stringify({ model: "m", choices: [{ message: { content: "" }, finish_reason: "length" }], usage: { prompt_tokens: 10, completion_tokens: 200, total_tokens: 210, completion_tokens_details: { reasoning_tokens: 200 } } }), { status: 200 })) as typeof fetch;
+    const llm = new BasetenLlm({ apiKey: "k", fetchFn });
+    await expect(llm.chat({ messages: [{ role: "user", content: "Hi" }], maxTokens: 200 })).rejects.toThrow(/empty content, finish_reason=length, reasoning_tokens=200/);
   });
   it("retries without reasoning_effort when the provider rejects it", async () => {
     const bodies: Array<Record<string, unknown>> = [];

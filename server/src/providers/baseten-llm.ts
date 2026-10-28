@@ -1,4 +1,4 @@
-import type { Llm, LlmChatInput, LlmChatResult, LlmStructuredInput } from "./llm.js";
+import { describeEmptyContent, type Llm, type LlmChatInput, type LlmChatResult, type LlmStructuredInput, type LlmUsage } from "./llm.js";
 
 export interface BasetenLlmOptions {
   apiKey: string;
@@ -10,6 +10,7 @@ export interface BasetenLlmOptions {
 interface ChatCompletionResponse {
   model?: string;
   choices?: Array<{ message?: { content?: string }; finish_reason?: string | null }>;
+  usage?: LlmUsage;
 }
 
 export const BASETEN_DEFAULT_MODEL = "meta-models/muse-spark-open-1026";
@@ -59,7 +60,8 @@ export class BasetenLlm implements Llm {
     const data = (await res.json()) as ChatCompletionResponse;
     const choice = data.choices?.[0];
     const text = choice?.message?.content;
-    if (typeof text !== "string") throw new Error("Baseten chat returned no message content");
+    if (typeof text !== "string" || text.trim() === "")
+      throw new Error(`Baseten chat returned no message content: ${describeEmptyContent(choice?.finish_reason, data.usage)}`);
     return { text, model: data.model ?? model, finishReason: choice?.finish_reason ?? null };
   }
 
@@ -70,6 +72,7 @@ export class BasetenLlm implements Llm {
         ...(input.system ? [{ role: "system" as const, content: input.system }] : []),
         { role: "user", content: `${input.prompt}\n\nRespond with JSON only, no prose.` },
       ],
+      ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
       ...(input.reasoningEffort !== undefined ? { reasoningEffort: input.reasoningEffort } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
