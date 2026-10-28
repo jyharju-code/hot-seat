@@ -196,6 +196,47 @@ export function revealedLandmines(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Debrief and front page (Brief 05)
+// ---------------------------------------------------------------------------
+
+const score = z.number().min(0).max(100);
+export const debriefSchema = z.object({
+  scores: z.object({
+    clarity: score,
+    accountability: score,
+    composure: score,
+    message_discipline: score,
+    empathy: score,
+  }),
+  verdict: z.string().min(1),
+  best_moments: z.array(z.object({ t: z.string(), quote: z.string(), why: z.string() })),
+  worst_moments: z.array(
+    z.object({ t: z.string(), quote: z.string(), why: z.string(), better: z.string() }),
+  ),
+  headline_quote: z.string(),
+  front_page: z.object({ headline: z.string().min(1), subhead: z.string() }),
+  landmines: z.array(z.object({ id: z.string(), handled: z.boolean(), comment: z.string() })),
+  one_thing_to_practice: z.string(),
+});
+export type Debrief = z.infer<typeof debriefSchema>;
+
+export interface FrontPageResult {
+  imageBase64: string;
+  mime: string;
+}
+
+export interface DebriefResponse {
+  debrief: Debrief;
+  frontPage: FrontPageResult | null;
+}
+
+/** Format elapsed seconds as mm:ss from session start. */
+export function formatMmSs(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
 /** Strip ElevenLabs audio tags (e.g. `[sharply]`) for display. TTS keeps the raw text. */
 export function stripAudioTags(text: string): string {
   return text

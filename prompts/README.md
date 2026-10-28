@@ -23,3 +23,8 @@ repository README; no code came with them.
   `{last_answer}` and `{spoken_style}` at runtime.
 - `opening-question.md`: same persona, no `last_answer`; asks the first
   question about the scenario.
+- `debrief.md`: the coach's debrief. Fill `{scenario_json}`, `{transcript}`,
+  `{events}` and `{language}` at runtime.
+- `front-page.md`: the Muse Image prompt for tomorrow's front page. Fill
+  `{paper_style}`, `{fictional_paper_name}`, `{tomorrow}`, `{headline}`,
+  `{subhead}` and `{company_name}` at runtime.
