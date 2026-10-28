@@ -106,5 +106,22 @@ main { padding: 48px 32px; max-width: 1100px; }
 .front-page img { display:block; width:100%; height:auto; }
 .news-player { max-width:900px; margin:48px 0; }
 .news-player h2 { font-size:32px; margin-bottom:16px; }
-.news-frame { aspect-ratio:16/9; background:#101418; }
-.news-canvas { display:block; width:100%; height:auto; }
+.news-frame { aspect-ratio:16/9; background:#101418; position:relative; overflow:hidden; }
+.news-canvas { display:block; width:100%; height:auto; position:relative; }
+.news-studio-css { position:absolute; inset:0; background:var(--ground-dark); display:flex; flex-direction:column; align-items:center; justify-content:flex-end; }
+.news-studio-sign { margin:auto; font-family:"Archivo Variable","Archivo",sans-serif; font-weight:900; font-stretch:80%; font-size:clamp(28px,6vw,64px); color:var(--ink); text-align:center; padding:0 24px; }
+.news-studio-desk { width:72%; height:22%; background:var(--ink); }
+.front-page-html { margin:48px 0; max-width:900px; background:var(--paper); color:var(--ink); padding:32px; border-top:6px solid var(--ink); border-bottom:2px solid var(--ink); }
+.front-page-masthead { display:flex; justify-content:space-between; align-items:baseline; gap:24px; border-bottom:1px solid var(--ink); padding-bottom:12px; }
+.front-page-paper { font-family:"Archivo Variable","Archivo",sans-serif; font-weight:900; font-stretch:80%; font-size:clamp(28px,5vw,52px); margin:0; line-height:1; }
+.front-page-date { margin:0; white-space:nowrap; }
+.front-page-headline { font-size:clamp(36px,7vw,72px); margin:24px 0 12px; }
+.front-page-subhead { font-size:22px; font-weight:700; line-height:1.3; margin:0 0 24px; }
+.front-page-photo { display:block; width:100%; height:auto; margin:0 0 24px; }
+.front-page-columns { columns:2; column-gap:32px; }
+@media (max-width:700px) { .front-page-columns { columns:1; } .front-page-masthead { flex-direction:column; gap:8px; } }
+.front-page-facts { border:1px solid var(--ink); padding:16px; margin:0 0 16px; break-inside:avoid; }
+.front-page-facts h3 { margin:0 0 8px; font-size:16px; }
+.front-page-facts ul { margin:0; padding-left:20px; }
+.front-page-quote { font-size:20px; font-weight:700; line-height:1.3; margin:0 0 16px; break-inside:avoid; }
+.front-page-footer { border-top:1px solid var(--ink); margin-top:24px; padding-top:12px; font-size:12px; }

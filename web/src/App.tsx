@@ -5,12 +5,14 @@ import {
   type Debrief,
   type DebriefLandmineStatus,
   type DebriefResponse,
+  type FrontPageResult,
   type GeneratedScenario,
   type ProvidersResponse,
   type ScenarioPreset,
 } from "@hot-seat/shared";
 import { Session, type CameraStill } from "./Session.js";
 import { NewsPlayer } from "./NewsPlayer.js";
+import { buildClientHtmlFrontPage, isHtmlFrontPage, type HtmlFrontPage } from "./front-page.js";
 
 type LoadState =
   | { kind: "loading" }
@@ -297,6 +299,61 @@ const LANDMINE_STATUS_LABELS: Record<DebriefLandmineStatus, string> = {
   not_raised: "Not raised",
 };
 
+export function HtmlFrontPageView({
+  page,
+  onRetry,
+  printing,
+}: {
+  page: HtmlFrontPage;
+  onRetry?: () => void;
+  printing?: boolean;
+}) {
+  return (
+    <article className="front-page-html" aria-label="Tomorrow's front page">
+      <header className="front-page-masthead">
+        <p className="front-page-paper">{page.paperName}</p>
+        {page.date && <p className="front-page-date">{page.date}</p>}
+      </header>
+      <h2 className="front-page-headline">{page.headline}</h2>
+      {page.subhead && <p className="front-page-subhead">{page.subhead}</p>}
+      {page.photoBase64 && (
+        <img
+          className="front-page-photo"
+          src={`data:${page.photoMime ?? "image/jpeg"};base64,${page.photoBase64}`}
+          alt=""
+        />
+      )}
+      <div className="front-page-columns">
+        <p>{page.summary}</p>
+        {page.keyFacts.length > 0 && (
+          <aside className="front-page-facts">
+            <h3>Key facts</h3>
+            <ul>
+              {page.keyFacts.map((fact, i) => (
+                <li key={i}>{fact}</li>
+              ))}
+            </ul>
+          </aside>
+        )}
+        {page.quotes.map((quote, i) => (
+          <blockquote key={i} className="front-page-quote">
+            &ldquo;{quote}&rdquo;
+          </blockquote>
+        ))}
+        <p className="front-page-company">{page.companyName}</p>
+      </div>
+      <footer className="front-page-footer">HOT SEAT SIMULATION. Fictional newspaper.</footer>
+      {onRetry && (
+        <p>
+          <button className="linklike" type="button" onClick={onRetry} disabled={printing}>
+            {printing ? "Printing." : "Try again"}
+          </button>
+        </p>
+      )}
+    </article>
+  );
+}
+
 function DebriefView({
   debrief,
   scenario,
@@ -313,7 +370,7 @@ function DebriefView({
   onNewCrisis: () => void;
 }) {
   const landmineFacts = new Map(scenario.landmines.map((m) => [m.id, m.fact]));
-  const [frontPage, setFrontPage] = useState(initialFrontPage);
+  const [frontPage, setFrontPage] = useState<FrontPageResult | null>(initialFrontPage);
   const [printing, setPrinting] = useState(!initialFrontPage && sessionId !== null);
 
   useEffect(() => {
@@ -336,6 +393,24 @@ function DebriefView({
     const id = window.setInterval(poll, 2000);
     return () => { cancelled = true; window.clearInterval(id); };
   }, [frontPage, sessionId]);
+
+  const retryFrontPage = () => {
+    if (!sessionId) return;
+    setPrinting(true);
+    fetch(`/api/sessions/${sessionId}/front-page/retry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    })
+      .then((res) => {
+        if (!res.ok && res.status !== 202) throw new Error("retry failed");
+        setFrontPage(null);
+      })
+      .catch(() => setPrinting(false));
+  };
+
+  const displayFrontPage: FrontPageResult | null =
+    frontPage ?? (printing ? null : buildClientHtmlFrontPage(debrief, scenario));
   return (
     <main>
       <h1 className="status-headline">Debrief.</h1>
@@ -414,17 +489,17 @@ function DebriefView({
         <p className="lede">{debrief.one_thing_to_practice}</p>
       </section>
 
-      {frontPage ? (
+      {displayFrontPage?.kind === "image" ? (
         <figure className="front-page">
           <img
-            src={`data:${frontPage.mime};base64,${frontPage.imageBase64}`}
+            src={`data:${displayFrontPage.mime};base64,${displayFrontPage.imageBase64}`}
             alt={`Tomorrow's front page: ${debrief.front_page.headline}`}
           />
         </figure>
-      ) : printing ? (
-        <p className="muted">Printing tomorrow&apos;s paper.</p>
+      ) : isHtmlFrontPage(displayFrontPage) ? (
+        <HtmlFrontPageView page={displayFrontPage} onRetry={sessionId ? retryFrontPage : undefined} printing={printing} />
       ) : (
-        <p className="muted">Tomorrow&apos;s front page could not be made this time.</p>
+        <p className="muted">Printing tomorrow&apos;s paper.</p>
       )}
 
       {debrief.news && sessionId && (
@@ -432,13 +507,19 @@ function DebriefView({
           sessionId={sessionId}
           news={debrief.news}
           scenario={scenario}
-          fallbackStillUrl={frontPage ? `data:${frontPage.mime};base64,${frontPage.imageBase64}` : null}
+          fallbackStillUrl={
+            displayFrontPage?.kind === "image"
+              ? `data:${displayFrontPage.mime};base64,${displayFrontPage.imageBase64}`
+              : isHtmlFrontPage(displayFrontPage) && displayFrontPage.photoBase64
+                ? `data:${displayFrontPage.photoMime ?? "image/jpeg"};base64,${displayFrontPage.photoBase64}`
+                : null
+          }
         />
       )}
 
       <p>
         <button className="primary" type="button" onClick={onTryAgain}>
-          Try again
+          Rehearse again
         </button>
       </p>
       <p>

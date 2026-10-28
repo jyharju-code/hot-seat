@@ -9,6 +9,11 @@ export function totalDurationMs(timeline: readonly NewsTimelinePart[]): number {
   return timeline.length ? timeline[timeline.length - 1]!.endMs : 0;
 }
 
+/** Plain CSS studio when the generated studio image is unavailable. */
+export function studioMode(clip: Pick<NewsClipResponse, "studioImageUrl" | "studioFallback">): "image" | "css" {
+  return clip.studioImageUrl && !clip.studioFallback ? "image" : "css";
+}
+
 const W = 1280;
 const H = 720;
 
@@ -137,12 +142,16 @@ export function NewsPlayer({
           : 0;
         const zoom = reduced ? 1 : 1 + partProgress * 0.08;
         const isSoundbite = part?.part === "soundbite";
-        drawCover(
-          ctx,
-          isSoundbite ? ownerImgRef.current : studioImgRef.current,
-          zoom,
-          isSoundbite ? scenario.company.name : clip.channel,
-        );
+        if (!isSoundbite && studioMode(clip) === "css") {
+          ctx.clearRect(0, 0, W, H);
+        } else {
+          drawCover(
+            ctx,
+            isSoundbite ? ownerImgRef.current : studioImgRef.current,
+            zoom,
+            isSoundbite ? scenario.company.name : clip.channel,
+          );
+        }
         // Channel bug
         ctx.fillStyle = "rgba(8,10,12,0.78)";
         ctx.fillRect(W - 330, 24, 306, 46);
@@ -280,7 +289,13 @@ export function NewsPlayer({
   return (
     <section className="news-player" aria-label="Evening news">
       <h2>Evening news</h2>
-      <div className="news-frame">
+      <div className={studioMode(clip) === "css" ? "news-frame news-frame-css" : "news-frame"}>
+        {studioMode(clip) === "css" && (
+          <div className="news-studio-css" aria-hidden="true">
+            <div className="news-studio-sign">{clip.channel}</div>
+            <div className="news-studio-desk" />
+          </div>
+        )}
         <canvas ref={canvasRef} width={W} height={H} className="news-canvas" />
       </div>
       <audio
