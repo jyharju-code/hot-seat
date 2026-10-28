@@ -358,6 +358,7 @@ function DebriefView({
               <p>
                 <strong>Better:</strong> &ldquo;{m.better}&rdquo;
               </p>
+              {m.principle && <p className="moment-principle">{m.principle}</p>}
             </article>
           ))}
         </section>

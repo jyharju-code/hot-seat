@@ -95,6 +95,7 @@ main { padding: 48px 32px; max-width: 1100px; }
 .moment { padding:16px 0; border-top:1px solid var(--ground-dark); }
 .moment-t { font-weight:700; margin:0 0 8px; }
 .moment-quote { font-size:22px; font-weight:700; line-height:1.25; margin:0 0 8px; }
+.moment-principle { font-size:13px; color:var(--muted); margin:4px 0 0; }
 .landmine-list { padding-left:20px; }
 .landmine-list li { padding:6px 0; }
 .landmine-status { font-weight:700; }

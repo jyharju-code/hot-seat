@@ -7,6 +7,8 @@ Reporter flags per turn: {events}
 
 Write the debrief in {language}. Be direct and useful, like a coach who respects the person.
 Judge what they actually said, not what they meant. Quote exactly.
+Judge by this research-backed coach knowledge, and only by it for the principles you name:
+{coach_knowledge}
 
 Landmine rules:
 - Never blame the owner for not mentioning a surprise landmine (owner_knows false) that the
@@ -27,7 +29,7 @@ Return ONLY JSON:
             "message_discipline": 0-100, "empathy": 0-100},
  "verdict": "two sentences",
  "best_moments": [{"t": "mm:ss", "quote": "exact words", "why": ""}],
- "worst_moments": [{"t": "mm:ss", "quote": "exact words", "why": "", "better": "what they could have said, spoken"}],
+ "worst_moments": [{"t": "mm:ss", "quote": "exact words", "why": "", "better": "what they could have said, spoken", "principle": "optional: short principle name plus source tag from the coach knowledge, e.g. Stealing thunder [Arpan & Roskos-Ewoldsen 2005]; omit when none fits"}],
  "headline_quote": "the single most damaging thing they actually said, verbatim",
  "front_page": {"headline": "max 8 words, built from their own words", "subhead": "max 14 words"},
  "landmines": [{"id": "L1", "status": "disclosed_proactively|raised_and_handled|raised_and_fumbled|not_raised", "comment": ""}],

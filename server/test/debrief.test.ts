@@ -45,6 +45,20 @@ describe("debrief schema", () => {
       debriefSchema.parse({ ...sampleDebrief, landmines: [{ id: "L1", status: "handled_it", comment: "x" }] }),
     ).toThrow();
   });
+  it("accepts worst_moments with and without the optional principle (brief 12)", () => {
+    const withPrinciple = {
+      ...sampleDebrief,
+      worst_moments: [
+        { ...sampleDebrief.worst_moments[0]!, principle: "Stealing thunder [Arpan & Roskos-Ewoldsen 2005]" },
+      ],
+    };
+    expect(debriefSchema.parse(withPrinciple).worst_moments[0]!.principle).toBe(
+      "Stealing thunder [Arpan & Roskos-Ewoldsen 2005]",
+    );
+    // Old debriefs without principle still parse, with principle undefined.
+    const old = debriefSchema.parse(sampleDebrief);
+    expect(old.worst_moments[0]!.principle).toBeUndefined();
+  });
   it("still parses the old handled:boolean landmine shape", () => {
     const old = { ...sampleDebrief, landmines: [{ id: "L1", handled: true, comment: "ok" }, { id: "L2", handled: false, comment: "bad" }] };
     const parsed = debriefSchema.parse(old);
@@ -91,6 +105,19 @@ describe("debrief prompt", () => {
     expect(prompt).toContain("Never blame the owner for not mentioning a surprise landmine");
     expect(prompt).not.toContain("{landmine_context}");
     expect(prompt).not.toContain("{session_length_seconds}");
+  });
+  it("fills {coach_knowledge} from prompts/coach-knowledge.md (brief 12)", async () => {
+    let prompt = "";
+    const coach = new DebriefCoach({
+      chat: async () => { throw new Error("unused"); },
+      generateStructured: async (input) => { prompt = input.prompt; return input.parse(sampleDebrief); },
+    });
+    await coach.generate(cafeTestScenario, turns, "en");
+    expect(prompt).not.toContain("{coach_knowledge}");
+    expect(prompt).toContain("Judge by this research-backed coach knowledge");
+    expect(prompt).toContain("stealing thunder");
+    expect(prompt).toContain("[Arpan & Roskos-Ewoldsen 2005]");
+    expect(prompt).toContain("[Coombs 2007]");
   });
 });
 

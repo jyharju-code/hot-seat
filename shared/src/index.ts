@@ -271,7 +271,14 @@ export const debriefSchema = z.object({
   verdict: z.string().min(1),
   best_moments: z.array(z.object({ t: z.string(), quote: z.string(), why: z.string() })),
   worst_moments: z.array(
-    z.object({ t: z.string(), quote: z.string(), why: z.string(), better: z.string() }),
+    z.object({
+      t: z.string(),
+      quote: z.string(),
+      why: z.string(),
+      better: z.string(),
+      /** Optional research principle, e.g. "Stealing thunder [Arpan & Roskos-Ewoldsen 2005]". Old debriefs omit it. */
+      principle: z.string().optional(),
+    }),
   ),
   headline_quote: z.string(),
   front_page: z.object({ headline: z.string().min(1), subhead: z.string() }),

@@ -62,8 +62,10 @@ export class DebriefCoach {
     language = "en",
   ): Promise<Debrief> {
     const template = await loadPrompt("debrief.md");
+    const coachKnowledge = await loadPrompt("coach-knowledge.md");
     const elapsed = sessionLengthSeconds(turns);
     const prompt = fillTemplate(template, {
+      coach_knowledge: coachKnowledge,
       scenario_json: JSON.stringify(scenario),
       session_length_seconds: String(elapsed),
       landmine_context: JSON.stringify(debriefLandmineInputs(scenario, elapsed)),
