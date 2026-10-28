@@ -18,6 +18,35 @@ export class StubTextToSpeech implements TextToSpeech {
   }
 }
 
+/** Default re-chunk target: 100 ms of PCM16 at 24 kHz. */
+export const TTS_CHUNK_BYTES = 4800;
+
+/**
+ * Re-chunk a PCM16 byte stream so every yielded chunk has an even length.
+ * Bytes are preserved exactly; at most one trailing lone byte is dropped.
+ * Full chunks of `chunkBytes` (rounded down to even) are emitted as they fill.
+ */
+export async function* rechunkPcm16(
+  source: AsyncIterable<Uint8Array>,
+  chunkBytes: number = TTS_CHUNK_BYTES,
+): AsyncIterable<Uint8Array> {
+  const size = Math.max(2, chunkBytes - (chunkBytes % 2));
+  let pending = new Uint8Array(0);
+  for await (const chunk of source) {
+    if (!chunk.length) continue;
+    const merged = new Uint8Array(pending.length + chunk.length);
+    merged.set(pending, 0);
+    merged.set(chunk, pending.length);
+    let off = 0;
+    while (merged.length - off >= size) {
+      yield merged.subarray(off, off + size);
+      off += size;
+    }
+    pending = merged.slice(off);
+  }
+  if (pending.length >= 2) yield pending.slice(0, pending.length - (pending.length % 2));
+}
+
 export interface ElevenLabsTtsOptions {
   apiKey: string;
   defaultVoiceId: string;
@@ -58,11 +87,16 @@ export class ElevenLabsTextToSpeech implements TextToSpeech {
     if (!res.ok) throw new Error(`ElevenLabs TTS failed: ${res.status} ${(await safeText(res)).slice(0, 200)}`);
     if (!res.body) throw new Error("ElevenLabs TTS returned no body");
     const reader = res.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value && value.length) yield value;
-    }
+    const raw: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]: async function* () {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.length) yield value;
+        }
+      },
+    };
+    yield* rechunkPcm16(raw);
   }
 }
 
