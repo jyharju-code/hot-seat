@@ -1,6 +1,6 @@
-import type { ReporterLine, ServerMessage, SessionState, TurnTiming } from "@hot-seat/shared";
+import { stripAudioTags, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
 import type { JournalistBrain, ConversationTurn } from "../journalist.js";
-import type { SpeechToText, SttSession } from "../providers/speech-to-text.js";
+import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { DemoScenario } from "../scenarios/cafe.js";
 
@@ -16,9 +16,13 @@ export interface OrchestratorDeps {
   sink: ClientSink;
   scenario: DemoScenario;
   voiceId: string;
+  /** Silence after the last final/partial before the turn ends. Default 1500. */
+  turnEndSilenceMs?: number;
   now?: () => number;
   log?: (line: string) => void;
 }
+
+export const DEFAULT_TURN_END_SILENCE_MS = 1500;
 
 /**
  * Half-duplex voice loop: listening -> thinking -> speaking -> listening.
@@ -104,24 +108,56 @@ export class SessionOrchestrator {
   }
 
   private async consumeStt(session: SttSession): Promise<void> {
-    for await (const ev of session.events()) {
+    const silenceMs = this.deps.turnEndSilenceMs ?? DEFAULT_TURN_END_SILENCE_MS;
+    const iter = session.events()[Symbol.asyncIterator]();
+    const parts: string[] = [];
+    let lastFinalAt: number | null = null;
+    let lastEndpointAt: number | null = null;
+    while (!this.stopped) {
+      const nextP = iter.next();
+      let result: IteratorResult<SttEvent>;
+      if (parts.length === 0) {
+        result = await nextP;
+      } else {
+        const TIMEOUT = Symbol("silence");
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const raced = await Promise.race([
+          nextP,
+          new Promise<typeof TIMEOUT>((resolve) => {
+            timer = setTimeout(() => resolve(TIMEOUT), silenceMs);
+          }),
+        ]);
+        if (timer) clearTimeout(timer);
+        if (raced === TIMEOUT) break;
+        result = raced as IteratorResult<SttEvent>;
+      }
+      if (result.done) break;
+      const ev = result.value;
       if (this.stopped) return;
       if (ev.type === "endpoint") {
-        if (this.speechEndAt === null) this.speechEndAt = this.now();
+        lastEndpointAt = this.now();
+        this.speechEndAt = lastEndpointAt;
       } else if (ev.type === "error") {
         this.fail(new Error(ev.message));
         return;
+      } else if (ev.type === "partial") {
+        // New partial text postpones the silence deadline (loop re-races).
+        continue;
       } else if (ev.type === "final") {
-        await this.handleFinal(ev.text);
-        return; // one turn per STT session; a fresh session starts after speaking
+        const segment = ev.text.trim();
+        if (!segment) continue; // ignore empty/whitespace finals: no turn, no LLM call
+        parts.push(segment);
+        lastFinalAt = this.now();
       }
-      // partials are intentionally unused for now (interrupt feature later)
     }
+    if (this.stopped || parts.length === 0) return;
+    const finalAt = lastFinalAt ?? this.now();
+    // Timing origin: last endpoint event if seen, else arrival of the last final segment.
+    const speechEndAt = lastEndpointAt ?? finalAt;
+    await this.handleFinal(parts.join(" "), speechEndAt, finalAt);
   }
 
-  private async handleFinal(text: string): Promise<void> {
-    const finalAt = this.now();
-    const speechEndAt = this.speechEndAt ?? finalAt;
+  private async handleFinal(text: string, speechEndAt: number, finalAt: number): Promise<void> {
     try {
       this.sttSession?.end();
       this.sttSession?.close();
@@ -164,7 +200,7 @@ export class SessionOrchestrator {
   /** Emit reporter_line, stream TTS audio, emit audio_end. Returns timing. */
   private async speak(line: ReporterLine, speechEndAt: number, finalAt: number, llmAt: number): Promise<TurnTiming> {
     this.deps.sink.send({ type: "reporter_line", line });
-    this.deps.sink.send({ type: "transcript", role: "reporter", text: line.say });
+    this.deps.sink.send({ type: "transcript", role: "reporter", text: stripAudioTags(line.say) });
     this.setState("speaking");
     let firstAudioAt: number | null = null;
     for await (const chunk of this.deps.tts.synthesize(line.say, { voiceId: this.deps.voiceId })) {

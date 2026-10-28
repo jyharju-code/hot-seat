@@ -110,3 +110,12 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
+
+/** Strip ElevenLabs audio tags (e.g. `[sharply]`) for display. TTS keeps the raw text. */
+export function stripAudioTags(text: string): string {
+  return text
+    .replace(/\[[^\]\n]*\]/g, "")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ +\n/g, "\n")
+    .trim();
+}

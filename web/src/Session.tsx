@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReporterLine, ServerMessage, SessionState, TurnTiming } from "@hot-seat/shared";
-import { serverMessageSchema } from "@hot-seat/shared";
+import { serverMessageSchema, stripAudioTags } from "@hot-seat/shared";
 
 interface Entry { role: "user" | "reporter"; text: string; timing?: TurnTiming }
 const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -83,10 +83,11 @@ export function Session({ onEnd }: { onEnd: () => void }) {
   function handleMessage(msg: ServerMessage) {
     if (msg.type === "state") setState(msg.state);
     else if (msg.type === "transcript") {
-      if (msg.role === "user") setLastAnswer(msg.text);
-      setEntries((e) => [...e, { role: msg.role, text: msg.text }]);
+      const display = stripAudioTags(msg.text);
+      if (msg.role === "user") setLastAnswer(display);
+      setEntries((e) => [...e, { role: msg.role, text: display }]);
     } else if (msg.type === "reporter_line") {
-      const line: ReporterLine = msg.line; setQuestion(line.say);
+      const line: ReporterLine = msg.line; setQuestion(stripAudioTags(line.say));
     } else if (msg.type === "audio_end") {
       const ctx = playCtxRef.current;
       const wait = ctx ? Math.max(0, (nextTimeRef.current - ctx.currentTime) * 1000) : 0;
