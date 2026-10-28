@@ -1,6 +1,6 @@
 import { stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
 import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
-import type { InterruptDecider } from "../interrupt.js";
+import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
@@ -380,12 +380,11 @@ export class SessionOrchestrator {
           const latencyMs = this.now() - started;
           this.log(`[interrupt] decision latency ${Math.round(latencyMs)}ms interrupt=${decision.interrupt}`);
           if (this.stopped || interruptReq || !decision.interrupt) return;
-          if (!listeningActive || this.state !== "listening") return;
-          if (latestPartial !== snapshot) {
+          if (isInterruptDecisionStale(snapshot, latestPartial, listeningActive && this.state === "listening")) {
             this.log("[interrupt] stale decision dropped (answer moved on)");
             return;
           }
-          interruptReq = { text: snapshot, say: decision.say, reason: decision.reason, decisionAt: this.now(), latencyMs };
+          interruptReq = { text: latestPartial, say: decision.say, reason: decision.reason, decisionAt: this.now(), latencyMs };
           this.teardownStt();
         } catch (err) {
           this.log(`[interrupt] decision failed: ${err instanceof Error ? err.message : String(err)}`);

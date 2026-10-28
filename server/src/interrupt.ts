@@ -16,6 +16,18 @@ export interface InterruptDecisionInput {
   facts: string;
 }
 
+/**
+ * A decision is stale only when the answer it was made on is no longer the
+ * live answer: the turn closed (or a new answer started), or the current
+ * partial no longer starts with the snapshot text. A partial that merely
+ * grew while the decision was in flight still starts with the snapshot,
+ * so a rambling answer that keeps going is acted on.
+ */
+export function isInterruptDecisionStale(snapshot: string, currentPartial: string, answerActive: boolean): boolean {
+  if (!answerActive) return true;
+  return !currentPartial.startsWith(snapshot);
+}
+
 export interface InterruptDecider {
   decide(input: InterruptDecisionInput, signal?: AbortSignal): Promise<InterruptDecision>;
 }

@@ -7,7 +7,7 @@ import type { TextToSpeech } from "../src/providers/text-to-speech.js";
 import { cafeScenario, cafeTestScenario } from "../src/scenarios/cafe.js";
 import { SessionOrchestrator, type ClientSink } from "../src/session/orchestrator.js";
 import { formatEvents, type SessionRecord } from "../src/session/store.js";
-import { LlmInterruptDecider, parseInterruptDecision, type InterruptDecision, type InterruptDecisionInput } from "../src/interrupt.js";
+import { isInterruptDecisionStale, LlmInterruptDecider, parseInterruptDecision, type InterruptDecision, type InterruptDecisionInput } from "../src/interrupt.js";
 
 const VALID = JSON.stringify({
   move: "follow_up",
@@ -757,7 +757,16 @@ describe("Interruptions (brief 07)", () => {
     await h.orch.stop();
   });
 
-  it("a stale result (answer moved on while deciding) is ignored", async () => {
+  it("staleness rule: grown partial with the snapshot as prefix is fresh, ended or rewritten is stale", () => {
+    const snap = "We take this very seriously";
+    expect(isInterruptDecisionStale(snap, "We take this very seriously and furthermore", true)).toBe(false);
+    expect(isInterruptDecisionStale(snap, snap, true)).toBe(false);
+    expect(isInterruptDecisionStale(snap, "We take this very seriously and furthermore", false)).toBe(true);
+    expect(isInterruptDecisionStale(snap, "Something else entirely", true)).toBe(true);
+    expect(isInterruptDecisionStale(snap, "", true)).toBe(true);
+  });
+
+  it("a decision that lands after the partial grew (same answer) still interrupts, with the grown text", async () => {
     let release!: (d: InterruptDecision) => void;
     const gate = new Promise<InterruptDecision>((r) => { release = r; });
     const decider = new FakeDecider(() => gate);
@@ -771,10 +780,34 @@ describe("Interruptions (brief 07)", () => {
     await ticks();
     expect(decider.calls).toHaveLength(1);
     release(YES);
+    await ticks(12);
+    expect(h.messages).toContainEqual({ type: "interrupt", say: YES.say });
+    expect(h.messages).toContainEqual({
+      type: "transcript",
+      role: "user",
+      text: "We take this very seriously and furthermore (cut off)",
+    });
+    expect(h.logs.some((l) => l.includes("stale decision dropped"))).toBe(false);
+    await h.orch.stop();
+  });
+
+  it("a decision that lands after the answer ended is stale and dropped", async () => {
+    let release!: (d: InterruptDecision) => void;
+    const gate = new Promise<InterruptDecision>((r) => { release = r; });
+    const decider = new FakeDecider(() => gate);
+    const h = await startedInterrupt(decider);
+    const s = h.session();
+    h.setNow(0); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(9000); s.emit({ type: "partial", text: "We take this very seriously" });
+    await ticks();
+    expect(decider.calls).toHaveLength(1);
+    s.emit({ type: "endpoint" });
+    s.emit({ type: "final", text: "We take this very seriously.", turnId: "t1" });
+    await new Promise((r) => setTimeout(r, 80));
+    await ticks();
+    release(YES);
     await ticks();
     expect(h.messages.some((m) => m.type === "interrupt")).toBe(false);
-    expect(s.closed).toBe(false);
-    expect(h.orch.currentState).toBe("listening");
     expect(h.logs.some((l) => l.includes("stale decision dropped"))).toBe(true);
     await h.orch.stop();
   });
