@@ -79,7 +79,12 @@ export const sessionStateSchema = z.enum(["listening", "thinking", "speaking"]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
 export const clientMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("start"), scenarioId: z.string().min(1) }),
+  z.object({
+    type: z.literal("start"),
+    scenarioId: z.string().min(1),
+    /** Multiplier for escalation at_seconds. Honoured only outside production. */
+    escalationScale: z.number().positive().finite().optional(),
+  }),
   z.object({ type: z.literal("playback_done") }),
   z.object({ type: z.literal("stop") }),
 ]);
@@ -102,9 +107,10 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("state"), state: sessionStateSchema }),
   z.object({
     type: z.literal("transcript"),
-    role: z.enum(["user", "reporter"]),
+    role: z.enum(["user", "reporter", "news"]),
     text: z.string(),
   }),
+  z.object({ type: z.literal("news_flash"), text: z.string(), atSeconds: z.number().nonnegative() }),
   z.object({ type: z.literal("reporter_line"), line: reporterLineSchema }),
   z.object({ type: z.literal("audio_end") }),
   z.object({ type: z.literal("timing"), timing: turnTimingSchema }),
