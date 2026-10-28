@@ -19,7 +19,8 @@ import { ElevenLabsTextToSpeech } from "../src/providers/index.js";
 import { presets } from "../src/scenarios/presets.js";
 import { voices } from "../src/voices.js";
 
-const wsUrl = process.argv[2] ?? "ws://127.0.0.1:3001/ws";
+const fastEscalations = process.argv.includes("--fast-escalations");
+const wsUrl = process.argv.slice(2).find((a) => !a.startsWith("--")) ?? "ws://127.0.0.1:3001/ws";
 const httpBase = wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
 const ANSWERS = [
   "We only noticed the problem that morning. We acted straight away, and we are sorry anyone was worried.",
@@ -75,12 +76,14 @@ async function main(): Promise<void> {
   // 2) Connect and play the browser for three turns.
   const ch = new Channel();
   const ws = new WebSocket(wsUrl);
+  let newsFlashes = 0;
   ws.on("message", (data: Buffer, isBinary: boolean) => {
     if (isBinary) {
       ch.push({ kind: "audio", bytes: data.length });
       return;
     }
     const msg = JSON.parse(data.toString()) as Ev["msg"];
+    if (msg?.type === "news_flash") newsFlashes += 1;
     console.log(`event: ${JSON.stringify(msg)}`);
     ch.push({ kind: "json", msg });
   });
@@ -88,7 +91,8 @@ async function main(): Promise<void> {
     ws.once("open", resolve);
     ws.once("error", reject);
   });
-  ws.send(JSON.stringify({ type: "start", scenarioId }));
+  ws.send(JSON.stringify({ type: "start", scenarioId, ...(fastEscalations ? { escalationScale: 0.1 } : {}) }));
+  if (fastEscalations) console.log("fast escalations: escalationScale 0.1");
 
   for (let turn = 0; turn < ANSWERS.length; turn++) {
     // Wait for the reporter line to finish streaming, counting audio bytes.
@@ -138,6 +142,8 @@ async function main(): Promise<void> {
 
   ws.send(JSON.stringify({ type: "stop" }));
   ws.close();
+  console.log(`news flashes seen: ${newsFlashes}`);
+  if (fastEscalations && newsFlashes < 1) throw new Error("--fast-escalations: expected at least one news flash in three turns");
   console.log("smoke:browserlike OK (3 turns, no errors)");
 }
 
