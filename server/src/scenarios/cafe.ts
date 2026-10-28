@@ -35,6 +35,7 @@ export const cafeTestScenario: GeneratedScenario = {
       name: "Walter",
       outlet: "The Riverside Courier",
       temperament: "relentless",
+      voice: "male",
       agenda: "find out whether the café knew about the broken display case before the incident",
       opening_question: "[impatient] Walter, Riverside Courier. When exactly did that display case break?",
     },

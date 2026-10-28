@@ -126,11 +126,15 @@ export const landmineSchema = z.object({
 });
 export type Landmine = z.infer<typeof landmineSchema>;
 
+export const voiceGenderSchema = z.enum(["female", "male"]);
+export type VoiceGender = z.infer<typeof voiceGenderSchema>;
+
 export const journalistSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   outlet: z.string().min(1),
   temperament: temperamentSchema,
+  voice: voiceGenderSchema.default("male"),
   agenda: z.string().min(1),
   opening_question: z.string().min(1),
 });

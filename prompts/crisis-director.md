@@ -37,6 +37,7 @@ Return ONLY JSON matching this schema:
   "landmines": [{"id": "L1", "fact": "", "who_knows": "journalist id", "reveal_after_seconds": 60}],
   "journalists": [{
     "id": "J1", "name": "", "outlet": "fictional", "temperament": "relentless|precise|human",
+    "voice": "female|male: matches the reporter's name",
     "agenda": "what story they want",
     "opening_question": "spoken, follows the spoken style rules"
   }],

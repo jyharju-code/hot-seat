@@ -9,10 +9,10 @@ import { clientMessageSchema } from "@hot-seat/shared";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { JournalistBrain, loadJournalistPrompts, primaryJournalist } from "./journalist.js";
-import { ElevenLabsTextToSpeech, MetaLlm, MuseSpeechToText } from "./providers/index.js";
+import { BasetenLlm, ElevenLabsTextToSpeech, MetaLlm, MuseSpeechToText } from "./providers/index.js";
 import { requireScenario, scenarioStore } from "./scenarios/store.js";
 import { SessionOrchestrator } from "./session/orchestrator.js";
-import { voices } from "./voices.js";
+import { voiceFor } from "./voices.js";
 
 const config = loadConfig();
 const app = buildApp(config);
@@ -66,9 +66,17 @@ wss.on("connection", (ws: WebSocket) => {
           const scenario = requireScenario(scenarioStore, scenarioId);
           const journalist = primaryJournalist(scenario);
           const prompts = await loadJournalistPrompts();
-          const llm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel });
-          const brain = new JournalistBrain(llm, prompts, config.llmChatModel);
-          const voice = voices[journalist.temperament];
+          let llm;
+          let turnModel = config.llmChatModel;
+          if (config.turnLlm === "baseten") {
+            if (!config.BASETEN_API_KEY) throw new Error("BASETEN_API_KEY is not configured on the server");
+            llm = new BasetenLlm({ apiKey: config.BASETEN_API_KEY });
+            turnModel = "meta-models/muse-spark-open-1026";
+          } else {
+            llm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel });
+          }
+          const brain = new JournalistBrain(llm, prompts, turnModel);
+          const voice = voiceFor(journalist.temperament, journalist.voice);
           orchestrator = new SessionOrchestrator({
             stt: new MuseSpeechToText({
               apiKey: config.MODEL_API_KEY,

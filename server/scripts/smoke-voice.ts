@@ -53,7 +53,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function main(): Promise<void> {
   const modelKey = requireKey("MODEL_API_KEY");
   const elevenKey = requireKey("ELEVENLABS_API_KEY");
-  const voice = voices.relentless;
+  const voice = voices.relentless.male;
   const tts = new ElevenLabsTextToSpeech({ apiKey: elevenKey, defaultVoiceId: voice.voiceId });
 
   // 1) Synthesize the owner answer at 16 kHz for the STT adapter.

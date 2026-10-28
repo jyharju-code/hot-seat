@@ -5,7 +5,7 @@ import { loadConfig } from "../src/config.js";
 import { cafeTestScenario } from "../src/scenarios/cafe.js";
 import { presets } from "../src/scenarios/presets.js";
 import { requireScenario, ScenarioStore } from "../src/scenarios/store.js";
-import { voices } from "../src/voices.js";
+import { voiceFor, voices } from "../src/voices.js";
 
 describe("scenario schema", () => {
   it("accepts a valid fixture", () => {
@@ -36,10 +36,26 @@ describe("presets and voices", () => {
     ]);
     for (const p of presets) expect(p.description.length).toBeGreaterThan(10);
   });
-  it("maps each temperament to its voice", () => {
-    expect(voices.relentless.voiceId).toBe("9ZbFvrGBxO3uSmsw6wdI");
-    expect(voices.precise.voiceId).toBe("NLRQGWzZAJhAXSlAr34B");
-    expect(voices.human.voiceId).toBe("TX3LPaxmHKxFdv7VOQHJ");
+  it("maps each temperament and gender to its voice", () => {
+    expect(voices.relentless.male.voiceId).toBe("9ZbFvrGBxO3uSmsw6wdI");
+    expect(voices.relentless.female.voiceId).toBe("EXAVITQu4vr4xnSDxMaL");
+    expect(voices.precise.male.voiceId).toBe("NLRQGWzZAJhAXSlAr34B");
+    expect(voices.precise.female.voiceId).toBe("Xb7hH8MSUJpSbSDYk0k2");
+    expect(voices.human.male.voiceId).toBe("TX3LPaxmHKxFdv7VOQHJ");
+    expect(voices.human.female.voiceId).toBe("XrExE9yKIg1WjnnlVkGX");
+    expect(voices.relentless.female.name).toBe("Sarah");
+    expect(voices.precise.female.name).toBe("Alice");
+    expect(voices.human.female.name).toBe("Matilda");
+  });
+  it("defaults a journalist without voice to male", () => {
+    const raw = JSON.parse(JSON.stringify(cafeTestScenario)) as Record<string, unknown>;
+    const journalists = raw.journalists as Array<Record<string, unknown>>;
+    delete journalists[0]!.voice;
+    const parsed = generatedScenarioSchema.parse(raw);
+    expect(parsed.journalists[0]!.voice).toBe("male");
+    expect(voiceFor(parsed.journalists[0]!.temperament, parsed.journalists[0]!.voice).voiceId).toBe("9ZbFvrGBxO3uSmsw6wdI");
+    expect(voiceFor("precise", "female").voiceId).toBe("Xb7hH8MSUJpSbSDYk0k2");
+    expect(voiceFor("human", undefined).name).toBe("Liam");
   });
 });
 
