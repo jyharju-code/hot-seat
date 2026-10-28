@@ -64,6 +64,20 @@ describe("front page prompt", () => {
     expect(local).toContain('a local newspaper called "The Riverside Courier"');
     expect(local).toContain("Use this exact photo");
     expect(local).toContain('"WE KNEW NOTHING, SAYS OWNER"');
+    // The body must tell this scenario's story, not an invented one.
+    expect(local).toContain(`The body columns report this story: ${cafeTestScenario.crisis.summary}`);
+    expect(local).toContain("KEY FACTS box:");
+    for (const fact of cafeTestScenario.public_facts.slice(0, 5)) {
+      expect(local).toContain(fact);
+    }
+    expect(local).toContain("Quote the owner only with these exact words:");
+    expect(local).toContain(`"${sampleDebrief.headline_quote}"`);
+    expect(local).toContain(`"${sampleDebrief.best_moments[0]!.quote}"`);
+    expect(local).toContain("the owner");
+    expect(local).toContain("Invent no other quotes from the owner.");
+    expect(local).not.toContain("{crisis_summary}");
+    expect(local).not.toContain("{key_facts}");
+    expect(local).not.toContain("{quotes}");
     const national = await buildFrontPagePrompt(
       sampleDebrief,
       { ...cafeTestScenario, format: "press_conference" },
@@ -71,8 +85,21 @@ describe("front page prompt", () => {
       "Friday 30 October 2026",
     );
     expect(national).toContain("a serious national broadsheet newspaper");
-    expect(national).toContain("a press photograph of the owner outside Kettle & Crumb");
+    expect(national).toContain(
+      "a press photograph of the storefront of Kettle & Crumb, with reporters and microphones outside, people seen from behind",
+    );
+    expect(national).not.toContain("a press photograph of the owner");
     expect(national).not.toContain("Use this exact photo");
+  });
+
+  it("caps key facts at five and quotes headline plus one best moment only", async () => {
+    const manyFacts = {
+      ...cafeTestScenario,
+      public_facts: ["fact one", "fact two", "fact three", "fact four", "fact five", "fact six"],
+    };
+    const prompt = await buildFrontPagePrompt(sampleDebrief, manyFacts, true, "Friday 30 October 2026");
+    expect(prompt).toContain("fact five");
+    expect(prompt).not.toContain("fact six");
   });
 });
 
@@ -147,7 +174,10 @@ describe("POST /api/sessions/:id/debrief", () => {
     expect(body.debrief.verdict).toContain("dodged");
     expect(body.frontPage.mime).toBe("image/webp");
     expect(Buffer.from(body.frontPage.imageBase64, "base64")).toEqual(Buffer.from([1, 2, 3]));
-    expect(generatedPrompt).toContain("press photograph of the owner outside Kettle & Crumb");
+    expect(generatedPrompt).toContain(
+      "a press photograph of the storefront of Kettle & Crumb, with reporters and microphones outside, people seen from behind",
+    );
+    expect(generatedPrompt).toContain(cafeTestScenario.crisis.summary);
     await app.close();
   });
 

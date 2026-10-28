@@ -27,4 +27,5 @@ repository README; no code came with them.
   `{events}` and `{language}` at runtime.
 - `front-page.md`: the Muse Image prompt for tomorrow's front page. Fill
   `{paper_style}`, `{fictional_paper_name}`, `{tomorrow}`, `{headline}`,
-  `{subhead}` and `{company_name}` at runtime.
+  `{subhead}`, `{company_name}`, `{crisis_summary}`, `{key_facts}` and
+  `{quotes}` at runtime.

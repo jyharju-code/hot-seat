@@ -60,6 +60,11 @@ export async function buildFrontPagePrompt(
       ? "a serious national broadsheet newspaper"
       : "a local newspaper";
   const paperName = scenario.journalists[0]?.outlet ?? "The Local Courier";
+  const quoteTexts = [debrief.headline_quote, debrief.best_moments[0]?.quote]
+    .map((q) => q?.trim())
+    .filter((q): q is string => Boolean(q));
+  const uniqueQuotes = [...new Set(quoteTexts)];
+  const quotes = uniqueQuotes.map((q) => `"${q}" (the owner)`).join(", ");
   let prompt = fillTemplate(template, {
     paper_style: paperStyle,
     fictional_paper_name: paperName,
@@ -67,6 +72,9 @@ export async function buildFrontPagePrompt(
     headline: debrief.front_page.headline,
     subhead: debrief.front_page.subhead,
     company_name: scenario.company.name,
+    crisis_summary: scenario.crisis.summary,
+    key_facts: scenario.public_facts.slice(0, 5).join("; "),
+    quotes,
   });
   if (!hasPhoto) {
     // No camera still: describe the lead photo instead of referencing one.
@@ -77,7 +85,7 @@ export async function buildFrontPagePrompt(
       )
       .replace(
         "Use this exact photo as the large lead image, styled as press photography.",
-        `Use as the large lead image a press photograph of the owner outside ${scenario.company.name}, styled as press photography.`,
+        `Use as the large lead image a press photograph of the storefront of ${scenario.company.name}, with reporters and microphones outside, people seen from behind, styled as press photography.`,
       );
   }
   return prompt;

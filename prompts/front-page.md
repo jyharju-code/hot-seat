@@ -3,6 +3,9 @@ dated {tomorrow}. Use this exact photo as the large lead image, styled as press 
 Any microphones carry no logos.
 Headline in huge bold serif: "{headline}".
 Subheadline: "{subhead}".
-Body columns about {company_name}, a small "KEY FACTS" box, two small side stories.
+The body columns report this story: {crisis_summary}
+KEY FACTS box: {key_facts}
+Quote the owner only with these exact words: {quotes}. Invent no other quotes from the owner.
+Body columns about {company_name}, two small side stories about the same story.
 In the bottom margin, small print: "HOT SEAT SIMULATION. Fictional newspaper."
 No real newspaper names, no real brands or logos anywhere.
