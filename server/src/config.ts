@@ -13,7 +13,9 @@ const envSchema = z.object({
   LLM_CHAT_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   LLM_STRUCTURED_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   TURN_LLM: z.enum(["meta", "baseten"]).default("meta"),
+  TURN_RACE: z.enum(["on", "off"]).default("on"),
   HEDGE_AFTER_MS: z.coerce.number().int().nonnegative().max(60_000).default(1800),
+  PARTIAL_STABLE_MS: z.coerce.number().int().positive().max(60_000).default(450),
   SCENARIO_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   SCENARIO_REASONING: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   DATA_DIR: z.string().min(1).default("./data"),
@@ -29,6 +31,8 @@ export type Config = z.infer<typeof envSchema> & {
   llmChatModel: string;
   llmStructuredModel: string;
   turnLlm: "meta" | "baseten";
+  turnRace: boolean;
+  partialStableMs: number;
   hedgeAfterMs: number;
   scenarioModel: string;
   scenarioReasoning: string;
@@ -47,6 +51,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     llmChatModel: parsed.data.LLM_CHAT_MODEL ?? "muse-spark-1.3",
     llmStructuredModel: parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
     turnLlm: parsed.data.TURN_LLM,
+    turnRace: parsed.data.TURN_RACE !== "off",
+    partialStableMs: parsed.data.PARTIAL_STABLE_MS,
     hedgeAfterMs: parsed.data.HEDGE_AFTER_MS,
     scenarioModel: parsed.data.SCENARIO_MODEL ?? parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
     scenarioReasoning: parsed.data.SCENARIO_REASONING ?? "medium",

@@ -76,11 +76,12 @@ wss.on("connection", (ws: WebSocket) => {
         primary: primaryProvider,
         hedge: hedgeProvider,
         hedgeAfterMs: config.hedgeAfterMs,
+        mode: config.turnRace ? "race" : "hedge",
         log: (line) => app.log.info(line),
       });
       const record = sessionStore.startSession(scenario, Date.now(), scenarioId);
       const brain = new JournalistBrain(llm, prompts, turnModel, (line) => app.log.info(line));
-      const interruptDecider = new LlmInterruptDecider(primaryLlm, await loadPrompt("interrupt-decision.md"), turnModel);
+      const interruptDecider = new LlmInterruptDecider(llm, await loadPrompt("interrupt-decision.md"), turnModel);
       const voice = voiceFor(journalist.temperament, journalist.voice);
       const orchestrator = new SessionOrchestrator({
         stt: new MuseSpeechToText({
@@ -96,6 +97,7 @@ wss.on("connection", (ws: WebSocket) => {
         interruptsEnabled: config.interruptsEnabled,
         ...(escalationScale !== undefined ? { escalationScale } : {}),
         voiceId: voice.voiceId,
+        partialStableMs: config.partialStableMs,
         turnEndSilenceMs: config.TURN_END_SILENCE_MS,
         turnEndHesitantMs: config.TURN_END_HESITANT_MS,
         listenIdleMs: config.LISTEN_IDLE_MS,

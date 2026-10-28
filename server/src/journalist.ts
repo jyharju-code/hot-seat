@@ -100,6 +100,12 @@ export class JournalistBrain {
     this.log = log ?? (() => undefined);
   }
 
+  /** Winner of the underlying provider race, when the LLM tracks one. */
+  get lastRaceWinner(): "meta" | "baseten" | null {
+    const llm = this.llm as Llm & { lastWinner?: "meta" | "baseten" | null };
+    return llm.lastWinner ?? null;
+  }
+
   /** Generated scenarios carry their opening question: no extra LLM call. */
   async openingQuestion(scenario: BrainScenario, signal?: AbortSignal): Promise<ReporterLine> {
     const p = persona(scenario);

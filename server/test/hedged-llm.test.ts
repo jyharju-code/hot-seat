@@ -89,3 +89,59 @@ describe("HedgedLlm", () => {
     await expect(llm.chat({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(/hedge down|primary down/);
   });
 });
+
+function raced(primary: FakeProvider, second: FakeProvider, logs: string[]) {
+  return new HedgedLlm({
+    primary: { name: "meta", llm: primary, model: "meta-model" },
+    hedge: { name: "baseten", llm: second, model: "baseten-model" },
+    mode: "race",
+    log: (l) => logs.push(l),
+  });
+}
+
+describe("HedgedLlm race mode (TURN_RACE=on)", () => {
+  it("starts both at once: fast Baseten wins, slow Meta is aborted", async () => {
+    const logs: string[] = [];
+    const primary = new FakeProvider({ delayMs: 500, text: "primary" });
+    const second = new FakeProvider({ delayMs: 10, text: "second" });
+    const llm = raced(primary, second, logs);
+    const res = await llm.chat({ messages: [{ role: "user", content: "hi" }] });
+    expect(res.text).toBe("second");
+    expect(primary.calls).toBe(1);
+    expect(second.calls).toBe(1);
+    expect(primary.aborted).toBe(true);
+    expect(llm.lastWinner).toBe("baseten");
+    expect(logs.some((l) => /^race: winner=baseten ms=\d+ loser_ms=aborted$/.test(l))).toBe(true);
+  });
+
+  it("fast Meta wins and Baseten is aborted", async () => {
+    const logs: string[] = [];
+    const primary = new FakeProvider({ delayMs: 5, text: "primary" });
+    const second = new FakeProvider({ delayMs: 500, text: "second" });
+    const llm = raced(primary, second, logs);
+    const res = await llm.chat({ messages: [{ role: "user", content: "hi" }] });
+    expect(res.text).toBe("primary");
+    expect(second.aborted).toBe(true);
+    expect(llm.lastWinner).toBe("meta");
+    expect(logs.some((l) => /^race: winner=meta ms=\d+ loser_ms=aborted$/.test(l))).toBe(true);
+  });
+
+  it("a fast failure does not end the race: the slower provider wins with a numeric loser_ms", async () => {
+    const logs: string[] = [];
+    const primary = new FakeProvider({ delayMs: 5, error: new Error("primary down") });
+    const second = new FakeProvider({ delayMs: 30, text: "second" });
+    const llm = raced(primary, second, logs);
+    const res = await llm.chat({ messages: [{ role: "user", content: "hi" }] });
+    expect(res.text).toBe("second");
+    expect(logs.some((l) => /^race: winner=baseten ms=\d+ loser_ms=\d+$/.test(l))).toBe(true);
+  });
+
+  it("throws when both providers fail in race mode", async () => {
+    const logs: string[] = [];
+    const primary = new FakeProvider({ delayMs: 5, error: new Error("primary down") });
+    const second = new FakeProvider({ delayMs: 5, error: new Error("second down") });
+    const llm = raced(primary, second, logs);
+    await expect(llm.chat({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(/primary down|second down/);
+    expect(llm.lastWinner).toBeNull();
+  });
+});

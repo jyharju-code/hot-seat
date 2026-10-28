@@ -15,6 +15,9 @@ export interface HedgedLlmOptions {
   primary: HedgedProvider;
   hedge?: HedgedProvider | null;
   hedgeAfterMs?: number;
+  /** "race" (default when a second provider exists in production wiring):
+   *  both providers start at once. "hedge": the second starts late. */
+  mode?: "hedge" | "race";
   log?: (line: string) => void;
   now?: () => number;
 }
@@ -35,21 +38,31 @@ export class HedgedLlm implements Llm {
   private readonly primary: HedgedProvider;
   private readonly hedge: HedgedProvider | null;
   private readonly hedgeAfterMs: number;
+  private readonly mode: "hedge" | "race";
   private readonly log: (line: string) => void;
   private readonly now: () => number;
+  private lastWinnerValue: HedgeProviderName | null = null;
 
   constructor(options: HedgedLlmOptions) {
     this.primary = options.primary;
     this.hedge = options.hedge ?? null;
     this.hedgeAfterMs = options.hedgeAfterMs ?? HEDGE_AFTER_MS;
+    this.mode = options.mode ?? "hedge";
     this.log = options.log ?? (() => undefined);
     this.now = options.now ?? (() => Date.now());
   }
 
+  /** Winner of the most recent chat call, or null before any call. */
+  get lastWinner(): HedgeProviderName | null {
+    return this.lastWinnerValue;
+  }
+
   async chat(input: LlmChatInput): Promise<LlmChatResult> {
+    if (this.mode === "race" && this.hedge) return this.chatRace(input);
     const started = this.now();
     if (!this.hedge) {
       const result = await this.callProvider(this.primary, input, input.signal);
+      this.lastWinnerValue = this.primary.name;
       this.log(`hedge: fired=false winner=${this.primary.name} ms=${Math.round(this.now() - started)}`);
       return result;
     }
@@ -81,6 +94,7 @@ export class HedgedLlm implements Llm {
         if (name === this.primary.name) hedgeCtl.abort();
         else primaryCtl.abort();
         cleanup();
+        this.lastWinnerValue = name;
         this.log(`hedge: fired=${fired} winner=${name} ms=${Math.round(this.now() - started)}`);
         resolve(result);
       };
@@ -126,6 +140,64 @@ export class HedgedLlm implements Llm {
           else startHedge();
         },
       );
+    });
+  }
+
+  /** Both providers start at once; the first successful result wins. */
+  private async chatRace(input: LlmChatInput): Promise<LlmChatResult> {
+    const second = this.hedge!;
+    const started = this.now();
+    if (input.signal?.aborted) throw abortError();
+    return new Promise<LlmChatResult>((resolve, reject) => {
+      let settled = false;
+      let failures = 0;
+      let firstError: unknown;
+      let loserMs: number | null = null;
+      const ctls: Record<HedgeProviderName, AbortController> = {
+        meta: new AbortController(),
+        baseten: new AbortController(),
+      };
+      const onCallerAbort = () => {
+        ctls.meta.abort();
+        ctls.baseten.abort();
+      };
+      input.signal?.addEventListener("abort", onCallerAbort, { once: true });
+      const cleanup = () => input.signal?.removeEventListener("abort", onCallerAbort);
+      const win = (name: HedgeProviderName, result: LlmChatResult) => {
+        if (settled) return;
+        settled = true;
+        const other = name === this.primary.name ? second : this.primary;
+        ctls[other.name].abort();
+        cleanup();
+        this.lastWinnerValue = name;
+        this.log(
+          `race: winner=${name} ms=${Math.round(this.now() - started)} loser_ms=${loserMs === null ? "aborted" : Math.round(loserMs)}`,
+        );
+        resolve(result);
+      };
+      const failOne = (err: unknown) => {
+        if (settled) return;
+        if (loserMs === null) loserMs = this.now() - started;
+        if (firstError === undefined) firstError = err;
+        failures += 1;
+        if (input.signal?.aborted) {
+          settled = true;
+          cleanup();
+          reject(abortError());
+          return;
+        }
+        if (failures >= 2) {
+          settled = true;
+          cleanup();
+          reject(firstError ?? new Error("Raced LLM request failed"));
+        }
+      };
+      for (const provider of [this.primary, second]) {
+        this.callProvider(provider, input, ctls[provider.name].signal).then(
+          (r) => win(provider.name, r),
+          failOne,
+        );
+      }
     });
   }
 
