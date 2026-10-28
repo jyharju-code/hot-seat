@@ -69,7 +69,7 @@ export function buildReport(results: readonly SessionResult[], meta: { preset: s
   for (const s of results) {
     if (s.debrief) {
       lines.push(
-        `Debrief (${s.profile}): ${s.debrief.ms} ms end to end, front page ${s.debrief.front_page ? "included" : "missing"}` +
+        `Debrief (${s.profile}): debrief ${s.debrief.debrief_ms ?? s.debrief.ms} ms, front page ${s.debrief.front_page_ms ?? "n/a"} ms (${s.debrief.front_page ? "ready" : "missing"})` +
           (s.debrief.headline ? `, headline: ${s.debrief.headline}` : ""),
         "",
       );

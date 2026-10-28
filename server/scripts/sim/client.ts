@@ -30,9 +30,42 @@ export interface TranscriptLine {
 }
 
 export interface DebriefOutcome {
+  /** Debrief POST time (kept as `ms` for older report readers). */
   ms: number;
+  debrief_ms: number;
+  front_page_ms: number | null;
   front_page: boolean;
   headline: string | null;
+}
+
+export interface FrontPagePollResult {
+  ms: number;
+  front_page: boolean;
+}
+
+/** Poll the front-page endpoint: 202 means printing (wait 1 s), max 90 s. */
+export async function pollFrontPage(
+  httpBase: string,
+  sessionId: string,
+  opts: { fetchFn?: typeof fetch; intervalMs?: number; maxWaitMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
+): Promise<FrontPagePollResult> {
+  const fetchFn = opts.fetchFn ?? fetch;
+  const intervalMs = opts.intervalMs ?? 1000;
+  const maxWaitMs = opts.maxWaitMs ?? 90_000;
+  const sleepFn = opts.sleepFn ?? sleep;
+  const started = performance.now();
+  for (;;) {
+    const res = await fetchFn(`${httpBase}/api/sessions/${sessionId}/front-page`);
+    const elapsed = Math.round(performance.now() - started);
+    if (res.status === 202) {
+      if (elapsed >= maxWaitMs) return { ms: elapsed, front_page: false };
+      await sleepFn(Math.min(intervalMs, Math.max(0, maxWaitMs - elapsed)));
+      continue;
+    }
+    if (!res.ok) return { ms: elapsed, front_page: false };
+    const body = (await res.json()) as { frontPage?: unknown };
+    return { ms: elapsed, front_page: body.frontPage != null };
+  }
 }
 
 export interface SessionResult {
@@ -333,7 +366,9 @@ export class SimSession {
     }
   }
 
-  /** End the session the way the End button does, then time debrief + front page. */
+  /** End the session the way the End button does. The debrief POST now
+   *  returns before the front page exists, so poll its endpoint and
+   *  report the two times separately. */
   private async endAndDebrief(sessionId: string): Promise<DebriefOutcome> {
     this.sendStop();
     await sleep(250);
@@ -343,9 +378,26 @@ export class SimSession {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ language: "en" }),
     });
-    const ms = Math.round(performance.now() - started);
+    const debriefMs = Math.round(performance.now() - started);
     if (!res.ok) throw new Error(`debrief failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
     const body = (await res.json()) as { debrief?: { front_page?: { headline?: string } }; frontPage?: unknown };
-    return { ms, front_page: body.frontPage != null, headline: body.debrief?.front_page?.headline ?? null };
+    if (body.frontPage != null) {
+      return {
+        ms: debriefMs,
+        debrief_ms: debriefMs,
+        front_page_ms: 0,
+        front_page: true,
+        headline: body.debrief?.front_page?.headline ?? null,
+      };
+    }
+    const polled = await pollFrontPage(this.opts.httpBase, sessionId);
+    this.log(`debrief ${debriefMs} ms, front page ${polled.ms} ms (${polled.front_page ? "ready" : "missing"})`);
+    return {
+      ms: debriefMs,
+      debrief_ms: debriefMs,
+      front_page_ms: polled.ms,
+      front_page: polled.front_page,
+      headline: body.debrief?.front_page?.headline ?? null,
+    };
   }
 }

@@ -20,6 +20,7 @@ import {
 import { estimateTtsChars, parseOwnerSegments } from "../scripts/sim/owner.js";
 import { ReporterLineQueue, linePlaybackMs } from "../scripts/sim/reporter-queue.js";
 import { estimateTotalChars, parseArgs } from "../scripts/sim/main.js";
+import { pollFrontPage } from "../scripts/sim/client.js";
 
 describe("sim WER", () => {
   it("is zero for identical text after normalisation", () => {
@@ -156,6 +157,34 @@ describe("sim owner segments and CLI", () => {
     expect(args).toMatchObject({ profiles: "rambler,hesitant", turns: 2, debrief: true, maxChars: 5000 });
     expect(estimateTotalChars(6, 4)).toBe(14400);
     expect(estimateTotalChars(6, 10)).toBeGreaterThan(20000);
+  });
+
+  it("polls the front-page endpoint through 202s until it is ready", async () => {
+    const urls: string[] = [];
+    let calls = 0;
+    const fetchFn = (async (url: string) => {
+      urls.push(url);
+      calls += 1;
+      if (calls < 3) return { status: 202, ok: false, json: async () => ({ status: "printing", frontPage: null }) };
+      return { status: 200, ok: true, json: async () => ({ frontPage: { imageBase64: "x", mime: "image/png" } }) };
+    }) as unknown as typeof fetch;
+    const result = await pollFrontPage("http://127.0.0.1:3001", "sess-1", {
+      fetchFn,
+      intervalMs: 1,
+      sleepFn: async () => undefined,
+    });
+    expect(result.front_page).toBe(true);
+    expect(calls).toBe(3);
+    expect(urls.every((u) => u === "http://127.0.0.1:3001/api/sessions/sess-1/front-page")).toBe(true);
+  });
+
+  it("front-page polling gives up at the cap and reports a failed page", async () => {
+    const printing = (async () => ({ status: 202, ok: false, json: async () => ({ frontPage: null }) })) as unknown as typeof fetch;
+    const timedOut = await pollFrontPage("http://x", "s", { fetchFn: printing, intervalMs: 1, maxWaitMs: 5, sleepFn: async () => undefined });
+    expect(timedOut.front_page).toBe(false);
+    const failed = (async () => ({ status: 200, ok: true, json: async () => ({ frontPage: null }) })) as unknown as typeof fetch;
+    const failedResult = await pollFrontPage("http://x", "s", { fetchFn: failed, sleepFn: async () => undefined });
+    expect(failedResult.front_page).toBe(false);
   });
 
   it("aggregates median, mean and worst", () => {
