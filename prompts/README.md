@@ -25,8 +25,9 @@ repository README; no code came with them.
   question about the scenario.
 - `interrupt-decision.md`: whether the reporter should cut in now. Fill
   `{name}`, `{outlet}`, `{question}`, `{seconds}`, `{partial}` and `{facts}`.
-- `debrief.md`: the coach's debrief. Fill `{scenario_json}`, `{transcript}`,
-  `{events}` and `{language}` at runtime.
+- `debrief.md`: the coach's debrief. Fill `{scenario_json}`,
+  `{session_length_seconds}`, `{landmine_context}`, `{transcript}`, `{events}`
+  and `{language}` at runtime.
 - `front-page.md`: the Muse Image prompt for tomorrow's front page. Fill
   `{paper_style}`, `{fictional_paper_name}`, `{tomorrow}`, `{headline}`,
   `{subhead}`, `{company_name}`, `{crisis_summary}`, `{key_facts}` and

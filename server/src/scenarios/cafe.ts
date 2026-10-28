@@ -13,10 +13,13 @@ export const cafeTestScenario: GeneratedScenario = {
     stakes: "Customers may be hurt and trust in the café is at risk",
   },
   briefing_for_user: [
-    "A customer says she found glass in a pastry",
-    "The post has 40,000 views",
-    "The health inspector visits tomorrow",
-    "The café has a glass display case for pastries",
+    "On Tuesday at about 09:40, customer Aino Korpi says she found a shard of glass in a cinnamon bun she bought at Kettle & Crumb",
+    "Her post about it was shared the same morning and has reached 40,000 views by Wednesday lunchtime",
+    "Pastries were pulled from sale on Tuesday at 11:15, and the glass display case was taken out of use that afternoon",
+    "The café stayed open for drinks only on Wednesday, and 2 of the 6 staff were sent home",
+    "The health inspector visits on Thursday at 10:00 and expects the café's own account of what happened",
+    "It is still unknown where the shard came from, and no other customer has reported finding glass so far",
+    "Regulars are upset in the post's comments and outside the shop, and The Riverside Courier is covering the story",
   ],
   public_facts: [
     "A customer posted that she found glass in a pastry at Kettle & Crumb",
@@ -25,9 +28,9 @@ export const cafeTestScenario: GeneratedScenario = {
     "The café has a glass display case for pastries",
   ],
   landmines: [
-    { id: "L1", fact: "The display case cracked two days earlier and was taped, not replaced", who_knows: "J1", reveal_after_seconds: 60 },
-    { id: "L2", fact: "A second customer messaged about a chipped plate last week", who_knows: "J1", reveal_after_seconds: 180 },
-    { id: "L3", fact: "The morning baker noticed the crack and told the shift lead", who_knows: "J1", reveal_after_seconds: 300 },
+    { id: "L1", fact: "The display case cracked two days earlier and was taped, not replaced", who_knows: "J1", reveal_after_seconds: 40, owner_knows: true },
+    { id: "L2", fact: "A second customer messaged about a chipped plate last week and the message was never answered", who_knows: "J1", reveal_after_seconds: 90, owner_knows: true },
+    { id: "L3", fact: "The morning baker noticed the crack and told the shift lead, who decided not to tell the owner", who_knows: "J1", reveal_after_seconds: 150, owner_knows: false },
   ],
   journalists: [
     {

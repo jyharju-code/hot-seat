@@ -8,6 +8,34 @@ import type { ImageGen, ImageResult } from "./providers/image-gen.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
 import { formatEvents, formatTranscript, type TimedTurn } from "./session/store.js";
 
+export interface DebriefLandmineInput {
+  id: string;
+  fact: string;
+  owner_knows: boolean;
+  reveal_after_seconds: number;
+  /** True when the reporter had learned this landmine by the end of the session. */
+  revealed_to_reporter: boolean;
+}
+
+/** Elapsed session length in seconds, from the last turn (0 when there are no turns). */
+export function sessionLengthSeconds(turns: readonly TimedTurn[]): number {
+  return turns.reduce((max, t) => Math.max(max, t.elapsedSeconds), 0);
+}
+
+/** Per-landmine debrief input: who knew it, and whether it was revealed in time. */
+export function debriefLandmineInputs(
+  scenario: GeneratedScenario,
+  elapsedSeconds: number,
+): DebriefLandmineInput[] {
+  return scenario.landmines.map((m) => ({
+    id: m.id,
+    fact: m.fact,
+    owner_knows: m.owner_knows,
+    reveal_after_seconds: m.reveal_after_seconds,
+    revealed_to_reporter: m.reveal_after_seconds <= elapsedSeconds,
+  }));
+}
+
 export type DebriefGenerator = (
   scenario: GeneratedScenario,
   turns: readonly TimedTurn[],
@@ -32,8 +60,11 @@ export class DebriefCoach {
     language = "en",
   ): Promise<Debrief> {
     const template = await loadPrompt("debrief.md");
+    const elapsed = sessionLengthSeconds(turns);
     const prompt = fillTemplate(template, {
       scenario_json: JSON.stringify(scenario),
+      session_length_seconds: String(elapsed),
+      landmine_context: JSON.stringify(debriefLandmineInputs(scenario, elapsed)),
       transcript: formatTranscript(turns),
       events: formatEvents(turns),
       language,

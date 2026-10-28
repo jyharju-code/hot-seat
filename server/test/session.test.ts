@@ -151,7 +151,7 @@ describe("JournalistBrain", () => {
     const brain = new JournalistBrain(llm, PROMPTS);
     await brain.nextTurn(cafeTestScenario, [], "We fixed it.", 30);
     expect(llm.lastPrompt).toContain("mines:None yet.");
-    await brain.nextTurn(cafeTestScenario, [], "We fixed it.", 90);
+    await brain.nextTurn(cafeTestScenario, [], "We fixed it.", 50);
     expect(llm.lastPrompt).toContain("display case cracked two days earlier");
     expect(llm.lastPrompt).not.toContain("second customer messaged");
   });

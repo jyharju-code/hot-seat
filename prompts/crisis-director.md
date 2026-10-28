@@ -19,8 +19,12 @@ Hard rules:
 - Business and organizational crises only. Never political, electoral, military or war-related
   scenarios, and no medical or mental-health advice. If the user asks for one, pick the closest
   business crisis instead.
-- Plant 3 landmines: facts the reporters know (or will learn mid-conversation) that the
-  spokesperson has not been told. Each must be fair: a well-prepared owner could handle it.
+- Plant exactly 3 landmines. Exactly 2 of them are things the owner already knows: their own
+  uncomfortable facts that the press does not have yet but a reporter can dig up. Mark those
+  "owner_knows": true. Exactly 1 is a genuine surprise the owner has not heard of. Mark it
+  "owner_knows": false. Each must be fair: a well-prepared owner could handle it. Spread
+  "reveal_after_seconds" between 30 and 150 so they can surface in a short interview (for
+  example 40, 90, 150).
 - Reporters: 1 for "interview", 3 for "press_conference", with different agendas and temperaments
   (relentless, precise, human angle). In an interview the single reporter mixes all three.
 - Write in {language}. Names, places and outlets fit the setting.
@@ -32,9 +36,9 @@ Return ONLY JSON matching this schema:
   "company": {"name": "", "industry": "", "city": "", "size": ""},
   "spokesperson_role": "e.g. owner, CEO, chair",
   "crisis": {"headline": "", "summary": "3 sentences", "timeline": ["..."], "stakes": "who is hurt and how"},
-  "briefing_for_user": ["4 to 6 short bullet points: what the user knows walking in"],
+  "briefing_for_user": ["6 to 8 concrete bullet points the owner knows walking in: what happened with times, numbers and names, what has been done so far, what is still unknown, who is upset and where"],
   "public_facts": ["..."],
-  "landmines": [{"id": "L1", "fact": "", "who_knows": "journalist id", "reveal_after_seconds": 60}],
+  "landmines": [{"id": "L1", "fact": "", "who_knows": "journalist id", "reveal_after_seconds": 40, "owner_knows": true}],
   "journalists": [{
     "id": "J1", "name": "", "outlet": "fictional", "temperament": "relentless|precise|human",
     "voice": "female|male: matches the reporter's name",

@@ -6,7 +6,7 @@ import { cafeTestScenario } from "../src/scenarios/cafe.js";
 import { ScenarioStore } from "../src/scenarios/store.js";
 import { formatEvents, formatTranscript, SessionStore } from "../src/session/store.js";
 import { MetaImageGen, type ImageGen } from "../src/providers/image-gen.js";
-import { buildFrontPagePrompt } from "../src/debrief.js";
+import { buildFrontPagePrompt, DebriefCoach, debriefLandmineInputs, sessionLengthSeconds } from "../src/debrief.js";
 
 export const sampleDebrief = {
   scores: { clarity: 70, accountability: 40, composure: 80, message_discipline: 55, empathy: 60 },
@@ -22,7 +22,7 @@ export const sampleDebrief = {
   ],
   headline_quote: "We knew nothing about it.",
   front_page: { headline: "WE KNEW NOTHING, SAYS OWNER", subhead: "Cafe owner faces questions over cracked case" },
-  landmines: [{ id: "L1", handled: false, comment: "You denied knowledge of the crack." }],
+  landmines: [{ id: "L1", status: "raised_and_fumbled" as const, comment: "You denied knowledge of the crack." }],
   one_thing_to_practice: "Say what you knew and when, before you are asked twice.",
 };
 
@@ -35,11 +35,62 @@ const turns = [
 describe("debrief schema", () => {
   it("accepts a valid debrief and rejects out-of-range scores", () => {
     expect(debriefSchema.parse(sampleDebrief).scores.clarity).toBe(70);
+    expect(debriefSchema.parse(sampleDebrief).landmines[0]!.status).toBe("raised_and_fumbled");
     expect(() =>
       debriefSchema.parse({ ...sampleDebrief, scores: { ...sampleDebrief.scores, clarity: 101 } }),
     ).toThrow();
     expect(() => debriefSchema.parse({ ...sampleDebrief, verdict: "" })).toThrow();
     expect(() => debriefSchema.parse({ ...sampleDebrief, landmines: [{ id: "L1" }] })).toThrow();
+    expect(() =>
+      debriefSchema.parse({ ...sampleDebrief, landmines: [{ id: "L1", status: "handled_it", comment: "x" }] }),
+    ).toThrow();
+  });
+  it("still parses the old handled:boolean landmine shape", () => {
+    const old = { ...sampleDebrief, landmines: [{ id: "L1", handled: true, comment: "ok" }, { id: "L2", handled: false, comment: "bad" }] };
+    const parsed = debriefSchema.parse(old);
+    expect(parsed.landmines).toEqual([
+      { id: "L1", status: "raised_and_handled", comment: "ok" },
+      { id: "L2", status: "raised_and_fumbled", comment: "bad" },
+    ]);
+  });
+});
+
+describe("debrief landmine inputs", () => {
+  it("marks revealed landmines correctly for a short session", () => {
+    const inputs = debriefLandmineInputs(cafeTestScenario, 50);
+    expect(inputs.map((i) => [i.id, i.owner_knows, i.revealed_to_reporter])).toEqual([
+      ["L1", true, true],
+      ["L2", true, false],
+      ["L3", false, false],
+    ]);
+    expect(sessionLengthSeconds(turns)).toBe(65);
+    expect(sessionLengthSeconds([])).toBe(0);
+  });
+  it("marks revealed landmines correctly for a long session", () => {
+    const inputs = debriefLandmineInputs(cafeTestScenario, 200);
+    expect(inputs.every((i) => i.revealed_to_reporter)).toBe(true);
+    // Boundary: reveal_after_seconds <= elapsed counts as revealed.
+    expect(debriefLandmineInputs(cafeTestScenario, 90).map((i) => i.revealed_to_reporter)).toEqual([true, true, false]);
+    expect(debriefLandmineInputs(cafeTestScenario, 39).map((i) => i.revealed_to_reporter)).toEqual([false, false, false]);
+  });
+});
+
+describe("debrief prompt", () => {
+  it("passes session length and per-landmine revealed flags to the coach prompt", async () => {
+    let prompt = "";
+    const coach = new DebriefCoach({
+      chat: async () => { throw new Error("unused"); },
+      generateStructured: async (input) => { prompt = input.prompt; return input.parse(sampleDebrief); },
+    });
+    await coach.generate(cafeTestScenario, turns, "en");
+    expect(prompt).toContain("Session length in seconds: 65");
+    expect(prompt).toContain('"owner_knows":true');
+    expect(prompt).toContain('"revealed_to_reporter":true');
+    // L2 (90s) and the surprise L3 (150s) were not revealed in 65s.
+    expect(prompt).toContain('"id":"L3","fact"');
+    expect(prompt).toContain("Never blame the owner for not mentioning a surprise landmine");
+    expect(prompt).not.toContain("{landmine_context}");
+    expect(prompt).not.toContain("{session_length_seconds}");
   });
 });
 

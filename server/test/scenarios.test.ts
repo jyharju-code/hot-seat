@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clientMessageSchema, generatedScenarioSchema, revealedLandmines } from "@hot-seat/shared";
+import { clientMessageSchema, generatedScenarioSchema, ownerKnownLandmines, revealedLandmines } from "@hot-seat/shared";
 import { buildApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { cafeTestScenario } from "../src/scenarios/cafe.js";
@@ -23,9 +23,24 @@ describe("scenario schema", () => {
 describe("landmine reveal filter", () => {
   it("filters by journalist and elapsed time", () => {
     expect(revealedLandmines(cafeTestScenario, "J1", 0)).toHaveLength(0);
-    expect(revealedLandmines(cafeTestScenario, "J1", 60).map((m) => m.id)).toEqual(["L1"]);
-    expect(revealedLandmines(cafeTestScenario, "J1", 200).map((m) => m.id)).toEqual(["L1", "L2"]);
+    expect(revealedLandmines(cafeTestScenario, "J1", 40).map((m) => m.id)).toEqual(["L1"]);
+    expect(revealedLandmines(cafeTestScenario, "J1", 200).map((m) => m.id)).toEqual(["L1", "L2", "L3"]);
     expect(revealedLandmines(cafeTestScenario, "J2", 9999)).toHaveLength(0);
+  });
+  it("defaults owner_knows to false so stored scenarios still load", () => {
+    const raw = JSON.parse(JSON.stringify(cafeTestScenario)) as { landmines: Array<Record<string, unknown>> };
+    for (const m of raw.landmines) delete m.owner_knows;
+    const parsed = generatedScenarioSchema.parse(raw);
+    expect(parsed.landmines.map((m) => m.owner_knows)).toEqual([false, false, false]);
+  });
+  it("briefing shows only owner-known landmines, never the surprise", () => {
+    const known = ownerKnownLandmines(cafeTestScenario);
+    expect(known.map((m) => m.id)).toEqual(["L1", "L2"]);
+    expect(known.map((m) => m.fact)).not.toContain(cafeTestScenario.landmines[2]!.fact);
+    expect(cafeTestScenario.landmines.filter((m) => !m.owner_knows)).toHaveLength(1);
+    expect(cafeTestScenario.landmines.map((m) => m.reveal_after_seconds)).toEqual([40, 90, 150]);
+    expect(cafeTestScenario.briefing_for_user.length).toBeGreaterThanOrEqual(6);
+    expect(cafeTestScenario.briefing_for_user.length).toBeLessThanOrEqual(8);
   });
 });
 

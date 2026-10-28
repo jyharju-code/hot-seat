@@ -141,6 +141,8 @@ export const landmineSchema = z.object({
   fact: z.string().min(1),
   who_knows: z.string().min(1),
   reveal_after_seconds: z.number().nonnegative(),
+  /** True when the owner already knows this fact (but the press does not, yet). Default keeps stored scenarios loading. */
+  owner_knows: z.boolean().default(false),
 });
 export type Landmine = z.infer<typeof landmineSchema>;
 
@@ -202,6 +204,11 @@ export interface CreateScenarioResponse {
   scenario: GeneratedScenario;
 }
 
+/** Landmines the owner already knows (shown in the briefing). The surprise landmine is excluded. */
+export function ownerKnownLandmines(scenario: GeneratedScenario): Landmine[] {
+  return scenario.landmines.filter((m) => m.owner_knows);
+}
+
 /** Landmines this journalist knows at `elapsedSeconds` into the session. */
 export function revealedLandmines(
   scenario: GeneratedScenario,
@@ -218,6 +225,38 @@ export function revealedLandmines(
 // ---------------------------------------------------------------------------
 
 const score = z.number().min(0).max(100);
+
+export const debriefLandmineStatusSchema = z.enum([
+  "disclosed_proactively",
+  "raised_and_handled",
+  "raised_and_fumbled",
+  "not_raised",
+]);
+export type DebriefLandmineStatus = z.infer<typeof debriefLandmineStatusSchema>;
+
+/**
+ * Landmine outcome in a debrief. The new shape is `{id, status, comment}`.
+ * Stored debriefs with the old `{id, handled: boolean, comment}` shape still
+ * parse: `handled: true` maps to `raised_and_handled`, `false` to
+ * `raised_and_fumbled`.
+ */
+export const debriefLandmineSchema = z
+  .object({
+    id: z.string().min(1),
+    status: debriefLandmineStatusSchema.optional(),
+    handled: z.boolean().optional(),
+    comment: z.string(),
+  })
+  .refine((m) => m.status !== undefined || m.handled !== undefined, {
+    message: "landmine needs status or handled",
+  })
+  .transform((m) => ({
+    id: m.id,
+    status: m.status ?? (m.handled ? "raised_and_handled" : "raised_and_fumbled"),
+    comment: m.comment,
+  }));
+export type DebriefLandmine = z.infer<typeof debriefLandmineSchema>;
+
 export const debriefSchema = z.object({
   scores: z.object({
     clarity: score,
@@ -233,7 +272,7 @@ export const debriefSchema = z.object({
   ),
   headline_quote: z.string(),
   front_page: z.object({ headline: z.string().min(1), subhead: z.string() }),
-  landmines: z.array(z.object({ id: z.string(), handled: z.boolean(), comment: z.string() })),
+  landmines: z.array(debriefLandmineSchema),
   one_thing_to_practice: z.string(),
 });
 export type Debrief = z.infer<typeof debriefSchema>;
