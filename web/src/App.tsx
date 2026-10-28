@@ -21,9 +21,9 @@ type View =
   | { kind: "buildError"; description: string; message: string }
   | { kind: "briefing"; built: CreateScenarioResponse }
   | { kind: "session"; built: CreateScenarioResponse; runId: number }
-  | { kind: "debriefing"; built: CreateScenarioResponse; still: CameraStill | null; startedAt: number }
+  | { kind: "debriefing"; built: CreateScenarioResponse; still: CameraStill | null; sessionId: string | null; startedAt: number }
   | { kind: "debrief"; built: CreateScenarioResponse; data: DebriefResponse }
-  | { kind: "debriefError"; built: CreateScenarioResponse; still: CameraStill | null; message: string };
+  | { kind: "debriefError"; built: CreateScenarioResponse; still: CameraStill | null; sessionId: string | null; message: string };
 
 export function App() {
   const [view, setView] = useState<View>({ kind: "home" });
@@ -96,7 +96,7 @@ export function App() {
     );
     let cancelled = false;
     const still = view.still;
-    fetch(`/api/sessions/${view.built.id}/debrief`, {
+    fetch(`/api/sessions/${view.sessionId ?? view.built.id}/debrief`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -118,6 +118,7 @@ export function App() {
             kind: "debriefError",
             built: view.built,
             still,
+            sessionId: view.sessionId,
             message: err instanceof Error ? err.message : "Debrief generation failed.",
           });
         }
@@ -143,8 +144,9 @@ export function App() {
           key={view.runId}
           scenarioId={view.built.id}
           onExpired={() => setView({ kind: "setup" })}
-          onEnd={(still) =>
-            setView({ kind: "debriefing", built: view.built, still, startedAt: Date.now() })
+          onStartAgain={() => setView({ kind: "session", built: view.built, runId: Date.now() })}
+          onEnd={(still, sessionId) =>
+            setView({ kind: "debriefing", built: view.built, still, sessionId, startedAt: Date.now() })
           }
         />
       ) : view.kind === "debriefing" ? (
@@ -166,6 +168,7 @@ export function App() {
                   kind: "debriefing",
                   built: view.built,
                   still: view.still,
+                  sessionId: view.sessionId,
                   startedAt: Date.now(),
                 })
               }

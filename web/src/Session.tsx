@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReporterLine, ServerMessage, SessionState, TurnTiming } from "@hot-seat/shared";
 import { serverMessageSchema, stripAudioTags } from "@hot-seat/shared";
 import { PcmPlayer } from "./audio/pcm-player.js";
+import { connectionLostUpdate } from "./session-connection.js";
 
 interface Entry { role: "user" | "reporter" | "news"; text: string; timing?: TurnTiming }
 const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -15,10 +16,12 @@ export function Session({
   scenarioId,
   onEnd,
   onExpired,
+  onStartAgain,
 }: {
   scenarioId: string;
-  onEnd: (still: CameraStill | null) => void;
+  onEnd: (still: CameraStill | null, sessionId: string | null) => void;
   onExpired?: () => void;
+  onStartAgain?: () => void;
 }) {
   const [live, setLive] = useState(false);
   const [state, setState] = useState<SessionState | null>(null);
@@ -28,7 +31,10 @@ export function Session({
   const [newsFlash, setNewsFlash] = useState("");
   const [error, setError] = useState("");
   const [expired, setExpired] = useState(false);
+  const [connectionLost, setConnectionLost] = useState(false);
+  const [endedMessage, setEndedMessage] = useState("");
   const [elapsed, setElapsed] = useState(0);
+  const sessionIdRef = useRef<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const stateRef = useRef<SessionState | null>(null);
   const playingRef = useRef(false);
@@ -133,6 +139,13 @@ export function Session({
           handleMessage(parsed.data);
         };
         ws.onerror = () => { if (!cancelled) setError("Connection to the server failed."); };
+        ws.onclose = () => {
+          if (cancelled) return;
+          const update = connectionLostUpdate();
+          setLive(update.live);
+          setConnectionLost(update.showStartAgain);
+          setError(update.error);
+        };
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Microphone unavailable.");
       }
@@ -146,7 +159,14 @@ export function Session({
     playerRef.current.push(data);
   }
   function handleMessage(msg: ServerMessage) {
-    if (msg.type === "interrupt") {
+    if (msg.type === "session_started") {
+      sessionIdRef.current = msg.sessionId;
+    }
+    else if (msg.type === "ended") {
+      setEndedMessage(msg.message);
+      setLive(false);
+    }
+    else if (msg.type === "interrupt") {
       // Stop sending mic audio (state is no longer listening) and play the cut-in.
       setState("speaking");
       stateRef.current = "speaking";
@@ -187,7 +207,7 @@ export function Session({
   function end() {
     try { wsRef.current?.send(JSON.stringify({ type: "stop" })); } catch { /* closed */ }
     const still = stillRef.current;
-    cleanupRef.current?.(); setLive(false); onEnd(still);
+    cleanupRef.current?.(); setLive(false); onEnd(still, sessionIdRef.current);
   }
   const statusText = state === "thinking" ? "Thinking." : state === "speaking" ? "Speaking." : state === "listening" ? "Listening." : "Connecting.";
   return (
@@ -196,6 +216,14 @@ export function Session({
       <h1 className="status-headline">{live ? <>Live. <span className="live-dot" aria-label="live" /></> : "Ready."} <span className="clock">{fmtClock(elapsed)}</span></h1>
       <p className="muted">{live ? statusText : "Starting microphone."}</p>
       {error && <p className="error">{error}</p>}
+      {endedMessage && <p className="muted">{endedMessage}</p>}
+      {connectionLost && (
+        <p>
+          <button className="primary" type="button" onClick={() => onStartAgain?.()}>
+            Start again
+          </button>
+        </p>
+      )}
       {expired && (
         <p>
           <button className="primary" type="button" onClick={() => onExpired?.()}>
