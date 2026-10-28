@@ -167,6 +167,12 @@ export function Session({
       setEndedMessage(msg.message);
       setLive(false);
     }
+    else if (msg.type === "session_complete") {
+      setEndedMessage(msg.message);
+      setLive(false);
+      // Go to the debrief as if End was pressed.
+      window.setTimeout(() => end(), 600);
+    }
     else if (msg.type === "interrupt") {
       // Stop sending mic audio (state is no longer listening) and play the cut-in.
       setState("speaking");

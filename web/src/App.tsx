@@ -19,7 +19,7 @@ type LoadState =
 type View =
   | { kind: "home" }
   | { kind: "setup" }
-  | { kind: "building"; description: string; startedAt: number }
+  | { kind: "building"; description: string; startedAt: number; mode: "hot_seat" | "profile"; durationMinutes: 5 | 10 }
   | { kind: "buildError"; description: string; message: string }
   | { kind: "briefing"; built: CreateScenarioResponse }
   | { kind: "session"; built: CreateScenarioResponse; runId: number }
@@ -31,7 +31,10 @@ export function App() {
   const [view, setView] = useState<View>({ kind: "home" });
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [description, setDescription] = useState("");
+  const [mode, setMode] = useState<"hot_seat" | "profile">("hot_seat");
+  const [durationMinutes, setDurationMinutes] = useState<5 | 10>(5);
   const [presets, setPresets] = useState<ScenarioPreset[]>([]);
+  const [profilePresets, setProfilePresets] = useState<ScenarioPreset[]>([]);
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -54,10 +57,10 @@ export function App() {
     fetch("/api/presets")
       .then(async (res) => {
         if (!res.ok) throw new Error(`Server replied ${res.status}`);
-        return (await res.json()) as { presets: ScenarioPreset[] };
+        return (await res.json()) as { presets: ScenarioPreset[]; profilePresets?: ScenarioPreset[] };
       })
-      .then((data) => { if (!cancelled) setPresets(data.presets); })
-      .catch(() => { if (!cancelled) setPresets([]); });
+      .then((data) => { if (!cancelled) { setPresets(data.presets); setProfilePresets(data.profilePresets ?? []); } })
+      .catch(() => { if (!cancelled) { setPresets([]); setProfilePresets([]); } });
     return () => { cancelled = true; };
   }, [view.kind]);
 
@@ -69,7 +72,7 @@ export function App() {
     fetch("/api/scenarios", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ description: view.description, language: "en" }),
+      body: JSON.stringify({ description: view.description, language: "en", mode: view.mode, duration_minutes: view.durationMinutes }),
     })
       .then(async (res) => {
         const data = (await res.json()) as CreateScenarioResponse & { error?: string };
@@ -131,7 +134,7 @@ export function App() {
     };
   }, [view.kind === "debriefing" ? view.startedAt : 0]);
 
-  const build = (text: string) => setView({ kind: "building", description: text, startedAt: Date.now() });
+  const build = (text: string) => setView({ kind: "building", description: text, startedAt: Date.now(), mode, durationMinutes });
 
   return (
     <>
@@ -212,8 +215,20 @@ export function App() {
         <Briefing scenario={view.built.scenario} onTake={() => setView({ kind: "session", built: view.built, runId: Date.now() })} onChange={() => setView({ kind: "setup" })} />
       ) : view.kind === "setup" ? (
         <main>
-          <h1 className="status-headline">Your crisis.</h1>
-          <label className="field-label" htmlFor="crisis-description">Your business and what went wrong</label>
+          <h1 className="status-headline">{mode === "profile" ? "Your profile." : "Your crisis."}</h1>
+          <p className="preset-row" role="group" aria-label="Rehearsal type">
+            <button className="linklike" type="button" onClick={() => setMode("hot_seat")}>Hot seat</button>
+            <button className="linklike" type="button" onClick={() => setMode("profile")}>Profile interview</button>
+          </p>
+          {mode === "profile" && (
+            <p className="preset-row" role="group" aria-label="Profile length">
+              <span>Length:</span>
+              <button className="linklike" type="button" onClick={() => setDurationMinutes(5)}>5 minutes</button>
+              <button className="linklike" type="button" onClick={() => setDurationMinutes(10)}>10 minutes</button>
+              <span className="muted">{durationMinutes} min selected</span>
+            </p>
+          )}
+          <label className="field-label" htmlFor="crisis-description">{mode === "profile" ? "Your business and the happy occasion" : "Your business and what went wrong"}</label>
           <textarea
             id="crisis-description"
             className="crisis-input"
@@ -221,11 +236,11 @@ export function App() {
             maxLength={600}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="My café in Leeds. A customer says she found glass in a croissant and the post is everywhere."
+            placeholder={mode === "profile" ? "My café in Leeds is ten years old and the local paper wants a feature." : "My café in Leeds. A customer says she found glass in a croissant and the post is everywhere."}
           />
-          {presets.length > 0 && (
+          {(mode === "profile" ? profilePresets : presets).length > 0 && (
             <p className="preset-row">
-              {presets.map((p) => (
+              {(mode === "profile" ? profilePresets : presets).map((p) => (
                 <button key={p.id} className="linklike" type="button" onClick={() => setDescription(p.description)}>{p.label}</button>
               ))}
             </p>
@@ -364,14 +379,27 @@ function DebriefView({
         </section>
       )}
 
+      {debrief.gave_away && debrief.gave_away.length > 0 && (
+        <section className="debrief-section" aria-label="What you gave away">
+          <h2>What you gave away</h2>
+          {debrief.gave_away.map((g, i) => (
+            <article key={i} className="moment">
+              <blockquote className="moment-quote">&ldquo;{g.quote}&rdquo;</blockquote>
+              <p>{g.framing}</p>
+              <p><strong>Better:</strong> &ldquo;{g.better}&rdquo;</p>
+            </article>
+          ))}
+        </section>
+      )}
+
       {debrief.landmines.length > 0 && (
         <section className="debrief-section" aria-label="Landmines">
-          <h2>Landmines</h2>
+          <h2>{scenario.format === "profile" ? "Sensitivities" : "Landmines"}</h2>
           <ul className="landmine-list">
             {debrief.landmines.map((l) => (
               <li key={l.id} className={`landmine landmine-${l.status.replaceAll("_", "-")}`}>
                 <strong>{l.id}</strong>{" "}
-                <span className="landmine-status">{LANDMINE_STATUS_LABELS[l.status]}.</span>{" "}
+                <span className="landmine-status">{scenario.format === "profile" && l.status === "disclosed_proactively" ? "Handled gracefully" : scenario.format === "profile" && l.status === "raised_and_fumbled" ? "Let it slip" : LANDMINE_STATUS_LABELS[l.status]}.</span>{" "}
                 {landmineFacts.get(l.id) && <span>{landmineFacts.get(l.id)} </span>}
                 {l.comment}
               </li>
@@ -415,13 +443,14 @@ function DebriefView({
 function Briefing({ scenario, onTake, onChange }: { scenario: GeneratedScenario; onTake: () => void; onChange: () => void }) {
   const reporter = scenario.journalists[0];
   const known = ownerKnownLandmines(scenario);
+  const profile = scenario.format === "profile";
   return (
     <main>
       <h1 className="status-headline">Your briefing.</h1>
       <section className="paper briefing" aria-label="Briefing">
         <h2>{scenario.company.name}, {scenario.company.city}</h2>
         <p className="headline-q">{scenario.crisis.headline}</p>
-        <h3>What happened</h3>
+        <h3>{profile ? "The occasion" : "What happened"}</h3>
         <ul className="briefing-list">
           {scenario.briefing_for_user.map((point, i) => (<li key={i}>{point}</li>))}
         </ul>
@@ -431,7 +460,7 @@ function Briefing({ scenario, onTake, onChange }: { scenario: GeneratedScenario;
         </ul>
         {known.length > 0 && (
           <>
-            <h3>What you know that the press doesn&apos;t, yet</h3>
+            <h3>{profile ? "Things you would rather not see in print" : "What you know that the press doesn't, yet"}</h3>
             <ul className="briefing-list">
               {known.map((m) => (<li key={m.id}>{m.fact}</li>))}
             </ul>

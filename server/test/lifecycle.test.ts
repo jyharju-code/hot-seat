@@ -95,10 +95,11 @@ function makeOrch(extra: Record<string, unknown> = {}) {
 }
 
 describe("config lifecycle defaults (brief 08 item 2)", () => {
-  it("defaults LISTEN_IDLE_MS to 60000 and MAX_SESSION_MS to 600000, both overridable", () => {
+  it("defaults LISTEN_IDLE_MS to 60000 and MAX_SESSION_MS to 720000 (10 min profile plus margin), both overridable", () => {
     const c = loadConfig({});
     expect(c.LISTEN_IDLE_MS).toBe(60_000);
-    expect(c.MAX_SESSION_MS).toBe(600_000);
+    expect(c.MAX_SESSION_MS).toBe(720_000);
+    expect(c.MAX_SESSION_MS).toBeGreaterThan(10 * 60_000);
     const c2 = loadConfig({ LISTEN_IDLE_MS: "5000", MAX_SESSION_MS: "9000" });
     expect(c2.LISTEN_IDLE_MS).toBe(5000);
     expect(c2.MAX_SESSION_MS).toBe(9000);
