@@ -6,7 +6,7 @@ import { PcmPlayer } from "./audio/pcm-player.js";
 interface Entry { role: "user" | "reporter"; text: string; timing?: TurnTiming }
 const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
-export function Session({ onEnd }: { onEnd: () => void }) {
+export function Session({ scenarioId, onEnd }: { scenarioId: string; onEnd: () => void }) {
   const [live, setLive] = useState(false);
   const [state, setState] = useState<SessionState | null>(null);
   const [question, setQuestion] = useState("");
@@ -56,7 +56,7 @@ export function Session({ onEnd }: { onEnd: () => void }) {
         node.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
           if (ws.readyState === WebSocket.OPEN && stateRef.current === "listening" && !playingRef.current) ws.send(ev.data);
         };
-        ws.onopen = () => { if (!cancelled) { setLive(true); ws.send(JSON.stringify({ type: "start" })); } };
+        ws.onopen = () => { if (!cancelled) { setLive(true); ws.send(JSON.stringify({ type: "start", scenarioId })); } };
         ws.onmessage = (ev: MessageEvent) => {
           if (ev.data instanceof ArrayBuffer) { playPcm(ev.data); return; }
           const parsed = serverMessageSchema.safeParse(JSON.parse(String(ev.data)) as unknown);

@@ -70,6 +70,13 @@ main { padding: 48px 32px; max-width: 1100px; }
   .qa { grid-template-columns: 1fr; }
   .topbar, main { padding-left: 20px; padding-right: 20px; }
 }
+.field-label { display:block; font-weight:700; margin-bottom:8px; }
+.crisis-input { display:block; width:100%; max-width:560px; padding:12px; font:inherit; background:var(--paper); color:var(--ink); border:1px solid var(--ink); border-radius:0; }
+.preset-row { display:flex; flex-wrap:wrap; gap:16px; max-width:560px; }
+.linklike { background:none; border:none; padding:0; color:var(--ink); text-decoration:underline; text-underline-offset:4px; cursor:pointer; font:inherit; }
+.briefing { margin-bottom:24px; }
+.briefing-list { list-style:disc; padding-left:20px; }
+.briefing-list li { display:list-item; border-top:none; padding:4px 0; }
 .live-dot { display:inline-block; width:.18em; height:.18em; border-radius:50%; background:var(--live); vertical-align:middle; }
 .clock { font-size:.35em; font-weight:700; }
 .headline-q { font-size:28px; font-weight:700; line-height:1.15; }
