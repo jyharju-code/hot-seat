@@ -20,6 +20,15 @@ import { presets } from "../src/scenarios/presets.js";
 import { voices } from "../src/voices.js";
 
 const fastEscalations = process.argv.includes("--fast-escalations");
+const ramble = process.argv.includes("--ramble");
+if (ramble) console.log("ramble: turn 2 answers with a long scripted non-answer, expecting an interrupt");
+const RAMBLE =
+  "We take this very seriously. Let me say that again, we take this very seriously. " +
+  "There are many aspects to this and we are looking at all of them very carefully. " +
+  "We take this very seriously. Our customers mean everything to us, and we are working " +
+  "hard behind the scenes every single day. We take this very seriously. There are processes " +
+  "and procedures, and we are following all of them as we always do. We take this very seriously. " +
+  "I want to be absolutely clear that we take this very seriously, and we will keep looking at every aspect of this.";
 const wsUrl = process.argv.slice(2).find((a) => !a.startsWith("--")) ?? "ws://127.0.0.1:3001/ws";
 const httpBase = wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
 const ANSWERS = [
@@ -77,6 +86,7 @@ async function main(): Promise<void> {
   const ch = new Channel();
   const ws = new WebSocket(wsUrl);
   let newsFlashes = 0;
+  let interrupts = 0;
   ws.on("message", (data: Buffer, isBinary: boolean) => {
     if (isBinary) {
       ch.push({ kind: "audio", bytes: data.length });
@@ -84,6 +94,7 @@ async function main(): Promise<void> {
     }
     const msg = JSON.parse(data.toString()) as Ev["msg"];
     if (msg?.type === "news_flash") newsFlashes += 1;
+    if (msg?.type === "interrupt") interrupts += 1;
     console.log(`event: ${JSON.stringify(msg)}`);
     ch.push({ kind: "json", msg });
   });
@@ -121,21 +132,33 @@ async function main(): Promise<void> {
     }
 
     // Speak the answer at real-time pace: 100 ms frames (3200 bytes at 16 kHz).
-    const answer = ANSWERS[turn]!;
+    const isRambleTurn = ramble && turn === 1;
+    const answer = isRambleTurn ? RAMBLE : ANSWERS[turn]!;
     const chunks: Uint8Array[] = [];
     for await (const c of tts.synthesize(answer, { outputFormat: "pcm_16000" })) chunks.push(c);
     const pcm = Buffer.concat(chunks);
     console.log(`turn ${turn + 1}: streaming answer (${(pcm.length / 32000).toFixed(1)} s): ${answer}`);
     const FRAME = 3200;
+    let stoppedForInterrupt = false;
     for (let off = 0; off < pcm.length; off += FRAME) {
+      if (isRambleTurn && interrupts > 0) {
+        stoppedForInterrupt = true;
+        break;
+      }
       ws.send(new Uint8Array(pcm.subarray(off, off + FRAME)));
       await sleep(100);
     }
-    // Trailing silence so endpointing can close the turn.
-    const silence = new Uint8Array(FRAME);
-    for (let i = 0; i < 20; i++) {
-      ws.send(silence);
-      await sleep(100);
+    if (stoppedForInterrupt) {
+      console.log(`turn ${turn + 1}: interrupt received, stopped streaming the ramble`);
+    } else {
+      // Trailing silence so endpointing can close the turn.
+      const silence = new Uint8Array(FRAME);
+      for (let i = 0; i < 20; i++) {
+        if (isRambleTurn && interrupts > 0) break;
+        ws.send(silence);
+        await sleep(100);
+      }
+      if (isRambleTurn && interrupts > 0) console.log(`turn ${turn + 1}: interrupt received during trailing silence`);
     }
     console.log(`turn ${turn + 1}: answer streamed, waiting for the reporter`);
   }
@@ -143,6 +166,8 @@ async function main(): Promise<void> {
   ws.send(JSON.stringify({ type: "stop" }));
   ws.close();
   console.log(`news flashes seen: ${newsFlashes}`);
+  console.log(`interrupts seen: ${interrupts}`);
+  if (ramble && interrupts < 1) throw new Error("--ramble: expected an interrupt event during the rambling answer in turn 2");
   if (fastEscalations && newsFlashes < 1) throw new Error("--fast-escalations: expected at least one news flash in three turns");
   console.log("smoke:browserlike OK (3 turns, no errors)");
 }
