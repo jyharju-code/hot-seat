@@ -7,6 +7,8 @@ export interface TimedTurn {
   elapsedSeconds: number;
   /** Reporter flags judging this turn (user turns) or the reporter's own move. */
   flags: ReporterFlag[];
+  /** Set on a cut-off owner turn: why the reporter interrupted. */
+  interruptReason?: string;
 }
 
 export interface SessionRecord {
@@ -53,6 +55,7 @@ export function formatTranscript(turns: readonly TimedTurn[]): string {
 /** News flashes and one line per flagged user turn, for the {events} prompt slot. */
 export function formatEvents(turns: readonly TimedTurn[]): string {
   const lines = turns.flatMap((t) => {
+    if (t.interruptReason) return [`[${formatMmSs(t.elapsedSeconds)}] Interrupted: ${t.interruptReason}`];
     if (t.role === "news") return [`[${formatMmSs(t.elapsedSeconds)}] News: ${t.text}`];
     if (t.role === "user" && t.flags.length > 0)
       return [`[${formatMmSs(t.elapsedSeconds)}] Owner flags: ${t.flags.join(", ")}`];

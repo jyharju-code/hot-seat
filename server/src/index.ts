@@ -9,6 +9,8 @@ import { clientMessageSchema } from "@hot-seat/shared";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { JournalistBrain, loadJournalistPrompts, primaryJournalist } from "./journalist.js";
+import { LlmInterruptDecider } from "./interrupt.js";
+import { loadPrompt } from "./prompts.js";
 import { BasetenLlm, ElevenLabsTextToSpeech, MetaLlm, MuseSpeechToText } from "./providers/index.js";
 import { requireScenario, scenarioStore } from "./scenarios/store.js";
 import { SessionOrchestrator } from "./session/orchestrator.js";
@@ -79,6 +81,7 @@ wss.on("connection", (ws: WebSocket) => {
           }
           const record = sessionStore.start(scenarioId, scenario, Date.now());
           const brain = new JournalistBrain(llm, prompts, turnModel);
+          const interruptDecider = new LlmInterruptDecider(llm, await loadPrompt("interrupt-decision.md"), turnModel);
           const voice = voiceFor(journalist.temperament, journalist.voice);
           orchestrator = new SessionOrchestrator({
             stt: new MuseSpeechToText({
@@ -95,6 +98,8 @@ wss.on("connection", (ws: WebSocket) => {
             },
             scenario,
             record,
+            interruptDecider,
+            interruptsEnabled: config.interruptsEnabled,
             ...(escalationScale !== undefined ? { escalationScale } : {}),
             voiceId: voice.voiceId,
             turnEndSilenceMs: config.TURN_END_SILENCE_MS,

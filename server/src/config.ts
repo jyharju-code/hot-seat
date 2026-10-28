@@ -16,6 +16,7 @@ const envSchema = z.object({
   SCENARIO_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   SCENARIO_REASONING: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   TURN_END_SILENCE_MS: z.coerce.number().int().positive().max(60_000).default(1500),
+  INTERRUPTS: z.enum(["on", "off"]).default("on"),
 });
 
 export type Config = z.infer<typeof envSchema> & {
@@ -24,6 +25,7 @@ export type Config = z.infer<typeof envSchema> & {
   turnLlm: "meta" | "baseten";
   scenarioModel: string;
   scenarioReasoning: string;
+  interruptsEnabled: boolean;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -39,6 +41,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     turnLlm: parsed.data.TURN_LLM,
     scenarioModel: parsed.data.SCENARIO_MODEL ?? parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
     scenarioReasoning: parsed.data.SCENARIO_REASONING ?? "medium",
+    interruptsEnabled: parsed.data.INTERRUPTS !== "off",
   };
 }
 

@@ -143,7 +143,14 @@ export function Session({
     playerRef.current.push(data);
   }
   function handleMessage(msg: ServerMessage) {
-    if (msg.type === "state") setState(msg.state);
+    if (msg.type === "interrupt") {
+      // Stop sending mic audio (state is no longer listening) and play the cut-in.
+      setState("speaking");
+      stateRef.current = "speaking";
+      playerRef.current?.beginLine();
+      setQuestion(stripAudioTags(msg.say));
+    }
+    else if (msg.type === "state") setState(msg.state);
     else if (msg.type === "news_flash") {
       setNewsFlash(msg.text);
       setEntries((e) => [...e, { role: "news", text: msg.text }]);

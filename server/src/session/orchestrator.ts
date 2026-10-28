@@ -1,5 +1,6 @@
 import { stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
-import type { JournalistBrain, ConversationTurn, BrainScenario } from "../journalist.js";
+import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
+import type { InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
@@ -30,6 +31,13 @@ export interface OrchestratorDeps {
   escalationScale?: number;
   newsVoiceId?: string;
   newsTtsModel?: string;
+  interruptDecider?: InterruptDecider;
+  /** Default true when a decider is present. Env INTERRUPTS maps here. */
+  interruptsEnabled?: boolean;
+  /** Owner must speak this long before any decision. Default 8000. */
+  interruptAfterMs?: number;
+  /** Minimum gap between decisions. Default 1500. */
+  interruptIntervalMs?: number;
 }
 
 export const NEWS_VOICE_ID = "3WqHLnw80rOZqJzW9YRB";
@@ -42,6 +50,9 @@ export const STT_KEEPALIVE_INTERVAL_MS = 100;
 export const STT_SILENCE_FRAME_BYTES = 3200;
 /** Reopen attempts in a row that may fail before the user sees an error. */
 export const STT_MAX_CONSECUTIVE_OPEN_FAILURES = 2;
+export const INTERRUPT_AFTER_MS = 8000;
+export const INTERRUPT_INTERVAL_MS = 1500;
+export const INTERRUPT_TTS_MODEL = "eleven_v4_turbo";
 
 /**
  * Half-duplex voice loop: thinking -> speaking -> (playback_done) listening.
@@ -66,6 +77,7 @@ export class SessionOrchestrator {
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private readonly firedEscalations = new Set<number>();
   private readonly learnedEscalations: Escalation[] = [];
+  private lastAnswerInterrupted = false;
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -220,6 +232,59 @@ export class SessionOrchestrator {
     const parts: string[] = [];
     let lastFinalAt: number | null = null;
     let lastEndpointAt: number | null = null;
+    // Interrupt decision state for this one answer.
+    let latestPartial = "";
+    let answerStartedAt: number | null = null;
+    let lastDecisionAt: number | null = null;
+    let lastDecisionText = "";
+    let decisionInFlight = false;
+    let listeningActive = true;
+    let interruptReq: { text: string; say: string; reason: string; decisionAt: number; latencyMs: number } | null = null;
+    const maybeDecide = (currentText: string): void => {
+      const decider = this.deps.interruptDecider;
+      if (!decider || !(this.deps.interruptsEnabled ?? true) || this.lastAnswerInterrupted) return;
+      if (this.stopped || interruptReq || decisionInFlight || answerStartedAt === null) return;
+      const nowMs = this.now();
+      if (nowMs - answerStartedAt < (this.deps.interruptAfterMs ?? INTERRUPT_AFTER_MS)) return;
+      if (lastDecisionAt !== null && nowMs - lastDecisionAt < (this.deps.interruptIntervalMs ?? INTERRUPT_INTERVAL_MS)) return;
+      if (currentText.trim().length === 0 || currentText.length <= lastDecisionText.length) return;
+      lastDecisionAt = nowMs;
+      lastDecisionText = currentText;
+      decisionInFlight = true;
+      const snapshot = currentText;
+      const started = nowMs;
+      const scenario = this.deps.scenario;
+      const persona = isGenerated(scenario)
+        ? { name: primaryJournalist(scenario).name, outlet: primaryJournalist(scenario).outlet, facts: scenario.public_facts.join("; ") }
+        : { name: scenario.reporter.name, outlet: scenario.reporter.outlet, facts: scenario.publicFacts.join("; ") };
+      const question = [...this.history].reverse().find((t) => t.role === "reporter")?.text ?? "";
+      void (async () => {
+        try {
+          const decision = await decider.decide({
+            name: persona.name,
+            outlet: persona.outlet,
+            question,
+            seconds: (started - (answerStartedAt ?? started)) / 1000,
+            partial: snapshot,
+            facts: persona.facts,
+          });
+          const latencyMs = this.now() - started;
+          this.log(`[interrupt] decision latency ${Math.round(latencyMs)}ms interrupt=${decision.interrupt}`);
+          if (this.stopped || interruptReq || !decision.interrupt) return;
+          if (!listeningActive || this.state !== "listening") return;
+          if (latestPartial !== snapshot) {
+            this.log("[interrupt] stale decision dropped (answer moved on)");
+            return;
+          }
+          interruptReq = { text: snapshot, say: decision.say, reason: decision.reason, decisionAt: this.now(), latencyMs };
+          this.teardownStt();
+        } catch (err) {
+          this.log(`[interrupt] decision failed: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          decisionInFlight = false;
+        }
+      })();
+    };
     // Consume sessions until the turn ends. A dead session is reopened in
     // place; `parts` (the answer collected so far) survives the reopen.
     while (!this.stopped) {
@@ -267,16 +332,26 @@ export class SessionOrchestrator {
           sessionDead = true;
         } else if (ev.type === "partial") {
           if (parts.length > 0) this.abortSpeculative();
+          const text = ev.text.trim();
+          if (text) {
+            if (answerStartedAt === null) answerStartedAt = this.now();
+            latestPartial = [...parts, text].join(" ");
+            maybeDecide(latestPartial);
+          }
           continue;
         } else if (ev.type === "final") {
           const segment = ev.text.trim();
           if (!segment) continue;
+          if (answerStartedAt === null) answerStartedAt = this.now();
           parts.push(segment);
+          latestPartial = parts.join(" ");
           lastFinalAt = this.now();
+          maybeDecide(latestPartial);
           this.startSpeculative(parts.join(" "));
         }
       }
       if (this.stopped) return;
+      if (interruptReq) break;
       if (turnEnded) break;
       if (sessionDead) {
         this.log(`[stt] session ended while listening; reopening (kept ${parts.length} answer segment(s))`);
@@ -285,7 +360,13 @@ export class SessionOrchestrator {
       }
       break;
     }
-    if (this.stopped || parts.length === 0) return;
+    listeningActive = false;
+    if (this.stopped) return;
+    if (interruptReq) {
+      await this.handleInterrupt(interruptReq);
+      return;
+    }
+    if (parts.length === 0) return;
     const finalAt = lastFinalAt ?? this.now();
     const speechEndAt = lastEndpointAt ?? finalAt;
     await this.handleFinal(parts.join(" "), speechEndAt, finalAt);
@@ -347,8 +428,57 @@ export class SessionOrchestrator {
     }
   }
 
+  /** Cut the owner off: the partial is their answer, the cut-in is the next question. */
+  private async handleInterrupt(req: { text: string; say: string; reason: string; decisionAt: number; latencyMs: number }): Promise<void> {
+    this.abortSpeculative();
+    this.teardownStt();
+    this.turnIndex += 1;
+    this.lastAnswerInterrupted = true;
+    const cutText = req.text.trim();
+    const display = `${cutText} (cut off)`;
+    this.deps.sink.send({ type: "transcript", role: "user", text: display });
+    this.history.push({ role: "user", text: cutText });
+    this.deps.record?.turns.push({
+      role: "user",
+      text: display,
+      elapsedSeconds: this.elapsedSeconds(),
+      flags: [],
+      interruptReason: req.reason || "interrupted",
+    });
+    this.deps.sink.send({ type: "interrupt", say: req.say });
+    this.deps.sink.send({ type: "transcript", role: "reporter", text: stripAudioTags(req.say) });
+    this.history.push({ role: "reporter", text: req.say });
+    this.deps.record?.turns.push({
+      role: "reporter",
+      text: stripAudioTags(req.say),
+      elapsedSeconds: this.elapsedSeconds(),
+      flags: [],
+    });
+    this.setState("speaking");
+    let firstAudioAt: number | null = null;
+    try {
+      for await (const chunk of this.deps.tts.synthesize(req.say, { voiceId: this.deps.voiceId, model: INTERRUPT_TTS_MODEL })) {
+        if (this.stopped) break;
+        if (firstAudioAt === null) {
+          firstAudioAt = this.now();
+          this.log(
+            `[interrupt] decision->firstAudio ${Math.round(firstAudioAt - req.decisionAt)}ms decision latency ${Math.round(req.latencyMs)}ms reason: ${req.reason}`,
+          );
+        }
+        this.deps.sink.sendAudio(chunk);
+      }
+    } catch (err) {
+      this.fail(err);
+      await this.beginListening();
+      return;
+    }
+    this.deps.sink.send({ type: "audio_end" });
+    if (!this.stopped) this.awaitingPlayback = true;
+  }
+
   private async handleFinal(text: string, speechEndAt: number, finalAt: number): Promise<void> {
     this.teardownStt(true);
+    this.lastAnswerInterrupted = false;
     this.turnIndex += 1;
     const userText = text.trim();
     this.deps.sink.send({ type: "transcript", role: "user", text: userText });

@@ -7,6 +7,7 @@ import type { TextToSpeech } from "../src/providers/text-to-speech.js";
 import { cafeScenario, cafeTestScenario } from "../src/scenarios/cafe.js";
 import { SessionOrchestrator, type ClientSink } from "../src/session/orchestrator.js";
 import { formatEvents, type SessionRecord } from "../src/session/store.js";
+import { LlmInterruptDecider, parseInterruptDecision, type InterruptDecision, type InterruptDecisionInput } from "../src/interrupt.js";
 
 const VALID = JSON.stringify({
   move: "follow_up",
@@ -48,6 +49,7 @@ class FakeLlm implements Llm {
 class FakeSession implements SttSession {
   pushed: Uint8Array[] = [];
   ended = false;
+  closed = false;
   private queue: SttEvent[] = [];
   private waiters: Array<(v: IteratorResult<SttEvent>) => void> = [];
   push(pcm: Uint8Array): void {
@@ -57,7 +59,8 @@ class FakeSession implements SttSession {
     this.ended = true;
   }
   close(): void {
-    /* noop */
+    this.closed = true;
+    while (this.waiters.length) this.waiters.shift()!({ value: undefined, done: true } as IteratorResult<SttEvent>);
   }
   onPartial(_cb: (t: string) => void): void {
     /* noop */
@@ -678,6 +681,167 @@ describe("Escalations (brief 06)", () => {
     await h.answer("Answer two.");
     expect(h.messages.filter((m) => m.type === "news_flash").map((m) => (m.type === "news_flash" ? m.text : ""))).toEqual(["First flash", "Second flash"]);
     expect(h.llm.lastPrompt).toContain("fact two");
+    await h.orch.stop();
+  });
+});
+
+describe("Interruptions (brief 07)", () => {
+  class FakeDecider {
+    calls: InterruptDecisionInput[] = [];
+    constructor(private readonly handler: (input: InterruptDecisionInput, n: number) => Promise<InterruptDecision> | InterruptDecision) {}
+    async decide(input: InterruptDecisionInput): Promise<InterruptDecision> {
+      this.calls.push(input);
+      return this.handler(input, this.calls.length);
+    }
+  }
+  const NO: InterruptDecision = { interrupt: false, reason: "", say: "" };
+  const YES: InterruptDecision = { interrupt: true, reason: "repeating a scripted line", say: "[interrupting] Sorry, when did you know?" };
+
+  async function startedInterrupt(decider: FakeDecider, opts: { enabled?: boolean } = {}) {
+    const stt = new FakeStt();
+    const tts = new FakeTts();
+    const { messages, audio, sink } = makeSink();
+    const logs: string[] = [];
+    let nowMs = 0;
+    const record: SessionRecord = { id: "s-int", scenario: cafeScenario as never, startedAtMs: 0, turns: [] };
+    const brain = { openingQuestion: async () => OPENING, nextTurn: async () => parseReporterLine(VALID) };
+    const orch = new SessionOrchestrator({
+      stt, brain: brain as never, tts, sink, scenario: cafeScenario, voiceId: "voice-1",
+      turnEndSilenceMs: 20, now: () => nowMs, log: (l) => logs.push(l), record,
+      interruptDecider: decider, interruptsEnabled: opts.enabled ?? true,
+    });
+    await orch.start();
+    await orch.playbackDone();
+    return { stt, tts, messages, audio, orch, logs, record, setNow: (ms: number) => { nowMs = ms; }, session: () => stt.sessions[stt.sessions.length - 1]! };
+  }
+  const ticks = async (n = 8) => { for (let i = 0; i < n; i++) await tick(); };
+
+  it("decider parses JSON and the LLM decider uses minimal reasoning with a filled prompt", async () => {
+    expect(parseInterruptDecision('{"interrupt":false}')).toEqual({ interrupt: false, reason: "", say: "" });
+    expect(parseInterruptDecision('{"interrupt":true,"reason":"dodge","say":""}')).toEqual({ interrupt: false, reason: "dodge", say: "" });
+    const llm = new FakeLlm([JSON.stringify(YES)]);
+    const decider = new LlmInterruptDecider(llm, "Q {name} {outlet} {question} {seconds} {partial} {facts}", "turn-model");
+    const out = await decider.decide({ name: "Walter", outlet: "Courier", question: "When?", seconds: 26, partial: "we take this very seriously", facts: "fact one" });
+    expect(out).toEqual(YES);
+    expect(llm.lastReasoning).toBe("minimal");
+    expect(llm.lastPrompt).toContain("Walter Courier When? 26");
+    expect(llm.lastPrompt).toContain("fact one");
+  });
+
+  it("no decision before 8 s; decisions only when the partial grew and at most every 1.5 s", async () => {
+    const decider = new FakeDecider(() => NO);
+    const h = await startedInterrupt(decider);
+    const s = h.session();
+    h.setNow(0); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(5000); s.emit({ type: "partial", text: "We take this very" });
+    await ticks();
+    expect(decider.calls).toHaveLength(0);
+    h.setNow(9000); s.emit({ type: "partial", text: "We take this very seriously and" });
+    await ticks();
+    expect(decider.calls).toHaveLength(1);
+    expect(decider.calls[0]!.seconds).toBe(9);
+    h.setNow(9500); s.emit({ type: "partial", text: "We take this very seriously and also" });
+    await ticks();
+    expect(decider.calls).toHaveLength(1);
+    h.setNow(10600); s.emit({ type: "partial", text: "We take this very seriously and also" });
+    await ticks();
+    // Grown since the last decision and 1.5 s have passed: a new decision.
+    expect(decider.calls).toHaveLength(2);
+    h.setNow(12200); s.emit({ type: "partial", text: "We take this very seriously and also" });
+    await ticks();
+    expect(decider.calls).toHaveLength(2);
+    h.setNow(12200); s.emit({ type: "partial", text: "We take this very seriously and also more words" });
+    await ticks();
+    expect(decider.calls).toHaveLength(3);
+    await h.orch.stop();
+  });
+
+  it("a stale result (answer moved on while deciding) is ignored", async () => {
+    let release!: (d: InterruptDecision) => void;
+    const gate = new Promise<InterruptDecision>((r) => { release = r; });
+    const decider = new FakeDecider(() => gate);
+    const h = await startedInterrupt(decider);
+    const s = h.session();
+    h.setNow(0); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(9000); s.emit({ type: "partial", text: "We take this very seriously" });
+    await ticks();
+    expect(decider.calls).toHaveLength(1);
+    s.emit({ type: "partial", text: "We take this very seriously and furthermore" });
+    await ticks();
+    expect(decider.calls).toHaveLength(1);
+    release(YES);
+    await ticks();
+    expect(h.messages.some((m) => m.type === "interrupt")).toBe(false);
+    expect(s.closed).toBe(false);
+    expect(h.orch.currentState).toBe("listening");
+    expect(h.logs.some((l) => l.includes("stale decision dropped"))).toBe(true);
+    await h.orch.stop();
+  });
+
+  it("interrupt closes STT, plays the cut-in in the reporter voice, and records transcript and debrief event", async () => {
+    const decider = new FakeDecider(() => YES);
+    const h = await startedInterrupt(decider);
+    const s = h.session();
+    h.setNow(0); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(9000); s.emit({ type: "partial", text: "We take this very seriously, we take this very seriously" });
+    await ticks(12);
+    expect(s.closed).toBe(true);
+    expect(h.messages).toContainEqual({ type: "interrupt", say: YES.say });
+    expect(h.messages).toContainEqual({ type: "transcript", role: "user", text: "We take this very seriously, we take this very seriously (cut off)" });
+    expect(h.messages).toContainEqual({ type: "transcript", role: "reporter", text: "Sorry, when did you know?" });
+    const cutIdx = h.tts.texts.indexOf(YES.say);
+    expect(cutIdx).toBeGreaterThanOrEqual(0);
+    expect(h.tts.options[cutIdx]).toEqual({ voiceId: "voice-1", model: "eleven_v4_turbo" });
+    expect(h.messages.some((m) => m.type === "audio_end")).toBe(true);
+    expect(h.orch.currentState).toBe("speaking");
+    expect(h.logs.some((l) => l.includes("[interrupt] decision latency"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("decision->firstAudio"))).toBe(true);
+    expect(h.record.turns).toContainEqual(expect.objectContaining({ role: "user", text: expect.stringContaining("(cut off)"), interruptReason: "repeating a scripted line" }));
+    expect(formatEvents(h.record.turns)).toContain("[00:09] Interrupted: repeating a scripted line");
+    await h.orch.stop();
+  });
+
+  it("never interrupts two answers in a row, but can interrupt again after a normal answer", async () => {
+    const decider = new FakeDecider(() => YES);
+    const h = await startedInterrupt(decider);
+    // Answer 1: interrupted.
+    let s = h.session();
+    h.setNow(0); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(9000); s.emit({ type: "partial", text: "We take this very seriously, we take this very seriously" });
+    await ticks(12);
+    expect(h.messages.filter((m) => m.type === "interrupt")).toHaveLength(1);
+    await h.orch.playbackDone(); await ticks();
+    // Answer 2: no decision at all, then a normal final turn.
+    s = h.session();
+    h.setNow(20000); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(30000); s.emit({ type: "partial", text: "We take this very seriously for a long time now" });
+    await ticks();
+    expect(decider.calls).toHaveLength(1);
+    s.emit({ type: "endpoint" });
+    s.emit({ type: "final", text: "We fixed it that morning.", turnId: "t2" });
+    await new Promise((r) => setTimeout(r, 80));
+    await ticks();
+    expect(h.orch.currentState).toBe("speaking");
+    await h.orch.playbackDone(); await ticks();
+    // Answer 3: interruption is allowed again, once.
+    s = h.session();
+    h.setNow(40000); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(50000); s.emit({ type: "partial", text: "We take this very seriously, we take this very seriously again" });
+    await ticks(12);
+    expect(decider.calls.length).toBeGreaterThanOrEqual(2);
+    expect(h.messages.filter((m) => m.type === "interrupt")).toHaveLength(2);
+    await h.orch.stop();
+  });
+
+  it("INTERRUPTS=off (interruptsEnabled false) never calls the decider", async () => {
+    const decider = new FakeDecider(() => YES);
+    const h = await startedInterrupt(decider, { enabled: false });
+    const s = h.session();
+    h.setNow(0); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(20000); s.emit({ type: "partial", text: "We take this very seriously for a very long time" });
+    await ticks();
+    expect(decider.calls).toHaveLength(0);
+    expect(h.messages.some((m) => m.type === "interrupt")).toBe(false);
     await h.orch.stop();
   });
 });

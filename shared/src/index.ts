@@ -111,6 +111,7 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     text: z.string(),
   }),
   z.object({ type: z.literal("news_flash"), text: z.string(), atSeconds: z.number().nonnegative() }),
+  z.object({ type: z.literal("interrupt"), say: z.string() }),
   z.object({ type: z.literal("reporter_line"), line: reporterLineSchema }),
   z.object({ type: z.literal("audio_end") }),
   z.object({ type: z.literal("timing"), timing: turnTimingSchema }),
