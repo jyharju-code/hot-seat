@@ -22,8 +22,9 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     (async (description, language) => {
       if (!config.MODEL_API_KEY) throw new Error("MODEL_API_KEY is not configured on the server");
       const director = new CrisisDirector(
-        new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: config.llmStructuredModel }),
-        config.llmStructuredModel,
+        new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: config.scenarioModel }),
+        config.scenarioModel,
+        config.scenarioReasoning,
       );
       return director.generate(description, language);
     });

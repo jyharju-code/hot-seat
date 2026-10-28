@@ -9,6 +9,7 @@ export interface LlmChatInput {
   temperature?: number;
   maxTokens?: number;
   reasoningEffort?: string;
+  signal?: AbortSignal;
 }
 
 export interface LlmChatResult {
@@ -22,6 +23,8 @@ export interface LlmStructuredInput<T> {
   prompt: string;
   system?: string;
   model?: string;
+  reasoningEffort?: string;
+  signal?: AbortSignal;
   /** Validate and parse the raw JSON value. Throw to reject it. */
   parse: (raw: unknown) => T;
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { loadConfig, providerStatuses } from "../src/config.js";
 import { MetaLlm } from "../src/providers/meta-llm.js";
+import { BasetenLlm } from "../src/providers/baseten-llm.js";
 import { StubImageGen, StubSpeechToText, StubTextToSpeech, NotImplementedError } from "../src/providers/index.js";
 
 describe("config", () => {
@@ -25,6 +26,25 @@ describe("config", () => {
   });
   it("defaults the chat model to muse-spark-1.3", () => {
     expect(loadConfig({}).llmChatModel).toBe("muse-spark-1.3");
+  });
+  it("defaults TURN_LLM to meta and scenario generation to wonder medium", () => {
+    const c = loadConfig({});
+    expect(c.turnLlm).toBe("meta");
+    expect(c.scenarioModel).toBe("muse-wonder-1.0");
+    expect(c.scenarioReasoning).toBe("medium");
+    const c2 = loadConfig({ TURN_LLM: "baseten", SCENARIO_MODEL: "muse-spark-1.3", SCENARIO_REASONING: "low" });
+    expect(c2.turnLlm).toBe("baseten");
+    expect(c2.scenarioModel).toBe("muse-spark-1.3");
+    expect(c2.scenarioReasoning).toBe("low");
+    expect(() => loadConfig({ TURN_LLM: "other" })).toThrow(/Invalid configuration/);
+  });
+  it("/api/providers shows the turn provider in use", () => {
+    const meta = providerStatuses(loadConfig({ MODEL_API_KEY: "x" }));
+    expect(meta.find((p) => p.id === "llm")?.adapter).toContain("Meta");
+    const baseten = providerStatuses(loadConfig({ TURN_LLM: "baseten", BASETEN_API_KEY: "y" }));
+    expect(baseten.find((p) => p.id === "llm")?.adapter).toContain("Baseten");
+    expect(baseten.find((p) => p.id === "llm")?.configured).toBe(true);
+    expect(JSON.stringify(baseten)).not.toContain("y");
   });
   it("provider statuses never expose secrets", () => {
     const s = providerStatuses(loadConfig({ MODEL_API_KEY: "secret-value" }));
@@ -82,6 +102,44 @@ describe("MetaLlm adapter (mocked fetch)", () => {
     const llm = new MetaLlm({ apiKey: "k", fetchFn });
     const out = await llm.generateStructured({ prompt: "Make one", parse: (raw) => (raw as { title: string }).title });
     expect(out).toBe("Crisis");
+  });
+});
+
+describe("BasetenLlm adapter (mocked fetch)", () => {
+  it("posts to inference.baseten.co with Api-Key auth and the open model", async () => {
+    let url = "";
+    let auth = "";
+    let bodyModel = "";
+    let reasoning: unknown;
+    const fetchFn = (async (u: string, init?: RequestInit) => {
+      url = String(u);
+      auth = String((init?.headers as Record<string, string>).authorization);
+      const body = JSON.parse(String(init?.body)) as { model: string; reasoning_effort?: string };
+      bodyModel = body.model;
+      reasoning = body.reasoning_effort;
+      return new Response(JSON.stringify({ model: bodyModel, choices: [{ message: { content: "Hi." }, finish_reason: "stop" }] }), { status: 200 });
+    }) as typeof fetch;
+    const llm = new BasetenLlm({ apiKey: "k", fetchFn });
+    const out = await llm.chat({ messages: [{ role: "user", content: "Hi" }], reasoningEffort: "minimal" });
+    expect(url).toBe("https://inference.baseten.co/v1/chat/completions");
+    expect(auth).toBe("Api-Key k");
+    expect(bodyModel).toBe("meta-models/muse-spark-open-1026");
+    expect(reasoning).toBe("minimal");
+    expect(out.text).toBe("Hi.");
+  });
+  it("retries without reasoning_effort when the provider rejects it", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchFn = (async (_u: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if ("reasoning_effort" in body) return new Response("unknown field reasoning_effort", { status: 400 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "Ok." }, finish_reason: "stop" }] }), { status: 200 });
+    }) as typeof fetch;
+    const llm = new BasetenLlm({ apiKey: "k", fetchFn });
+    const out = await llm.chat({ messages: [{ role: "user", content: "Hi" }], reasoningEffort: "minimal" });
+    expect(out.text).toBe("Ok.");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).not.toHaveProperty("reasoning_effort");
   });
 });
 

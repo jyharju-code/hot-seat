@@ -12,12 +12,18 @@ const envSchema = z.object({
   BASETEN_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   LLM_CHAT_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   LLM_STRUCTURED_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  TURN_LLM: z.enum(["meta", "baseten"]).default("meta"),
+  SCENARIO_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  SCENARIO_REASONING: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   TURN_END_SILENCE_MS: z.coerce.number().int().positive().max(60_000).default(1500),
 });
 
 export type Config = z.infer<typeof envSchema> & {
   llmChatModel: string;
   llmStructuredModel: string;
+  turnLlm: "meta" | "baseten";
+  scenarioModel: string;
+  scenarioReasoning: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -30,12 +36,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...parsed.data,
     llmChatModel: parsed.data.LLM_CHAT_MODEL ?? "muse-spark-1.3",
     llmStructuredModel: parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
+    turnLlm: parsed.data.TURN_LLM,
+    scenarioModel: parsed.data.SCENARIO_MODEL ?? parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
+    scenarioReasoning: parsed.data.SCENARIO_REASONING ?? "medium",
   };
 }
 
 export function providerStatuses(config: Config) {
+  const turnIsBaseten = config.turnLlm === "baseten";
   return [
-    { id: "llm" as const, label: "Language model (Muse Spark / Wonder)", adapter: "Meta Model API", configured: Boolean(config.MODEL_API_KEY) },
+    {
+      id: "llm" as const,
+      label: turnIsBaseten ? "Language model (turns: Baseten muse-spark-open, scenarios: Muse Wonder)" : "Language model (Muse Spark / Wonder)",
+      adapter: turnIsBaseten ? "Baseten (turns) + Meta Model API (scenarios)" : "Meta Model API",
+      configured: turnIsBaseten ? Boolean(config.BASETEN_API_KEY) : Boolean(config.MODEL_API_KEY),
+    },
     { id: "speech-to-text" as const, label: "Speech to text (Muse Voice Transcribe)", adapter: "Meta Muse Voice Transcribe", configured: Boolean(config.MODEL_API_KEY) },
     { id: "text-to-speech" as const, label: "Text to speech (ElevenLabs)", adapter: "ElevenLabs eleven_v4", configured: Boolean(config.ELEVENLABS_API_KEY) },
     { id: "image-gen" as const, label: "Image (Muse Image)", adapter: "Meta Muse Image", configured: Boolean(config.MODEL_API_KEY) },

@@ -12,10 +12,12 @@ export type ScenarioGenerator = (description: string, language: string) => Promi
 export class CrisisDirector {
   private readonly llm: Llm;
   private readonly model: string | undefined;
+  private readonly reasoningEffort: string | undefined;
 
-  constructor(llm: Llm, model?: string) {
+  constructor(llm: Llm, model?: string, reasoningEffort?: string) {
     this.llm = llm;
     this.model = model;
+    this.reasoningEffort = reasoningEffort;
   }
 
   async generate(description: string, language = "en"): Promise<GeneratedScenario> {
@@ -28,6 +30,7 @@ export class CrisisDirector {
       prompt: description,
       system,
       ...(this.model ? { model: this.model } : {}),
+      ...(this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : {}),
       parse: (raw) => generatedScenarioSchema.parse(raw),
     });
   }

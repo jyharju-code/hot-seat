@@ -43,6 +43,7 @@ export class MetaLlm implements Llm {
     const res = await this.fetchFn(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+      ...(input.signal ? { signal: input.signal } : {}),
       body: JSON.stringify({
         model,
         messages: input.messages,
@@ -64,9 +65,11 @@ export class MetaLlm implements Llm {
     const res = await this.fetchFn(`${this.baseUrl}/responses`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+      ...(input.signal ? { signal: input.signal } : {}),
       body: JSON.stringify({
         model,
         ...(input.system ? { instructions: input.system } : {}),
+        ...(input.reasoningEffort !== undefined ? { reasoning: { effort: input.reasoningEffort } } : {}),
         input: `${input.prompt}\n\nRespond with JSON only, no prose.`,
         text: { format: { type: "json_object" } },
       }),
