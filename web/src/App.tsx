@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ProvidersResponse } from "@hot-seat/shared";
+import { Session } from "./Session.js";
 
 type LoadState =
   | { kind: "loading" }
@@ -7,6 +8,7 @@ type LoadState =
   | { kind: "error"; message: string };
 
 export function App() {
+  const [view, setView] = useState<"home" | "session">("home");
   const [state, setState] = useState<LoadState>({ kind: "loading" });
 
   useEffect(() => {
@@ -31,6 +33,7 @@ export function App() {
           <a className="current" href="/">Home</a>
         </nav>
       </header>
+      {view === "session" ? <Session onEnd={() => setView("home")} /> : (
       <main>
         <h1 className="status-headline">Take the seat.</h1>
         <p className="lede">
@@ -38,7 +41,7 @@ export function App() {
           before a real crisis day arrives.
         </p>
         <p>
-          <button className="primary" type="button" disabled>Start</button>
+          <button className="primary" type="button" onClick={() => setView("session")}>Start</button>
         </p>
         <section className="paper" id="providers" aria-label="Providers">
           <h2>Providers</h2>
@@ -55,7 +58,7 @@ export function App() {
             </ul>
           )}
         </section>
-      </main>
+      </main>)}
     </>
   );
 }
