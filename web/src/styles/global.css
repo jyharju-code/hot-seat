@@ -96,5 +96,9 @@ main { padding: 48px 32px; max-width: 1100px; }
 .moment-quote { font-size:22px; font-weight:700; line-height:1.25; margin:0 0 8px; }
 .landmine-list { padding-left:20px; }
 .landmine-list li { padding:6px 0; }
+.landmine-status { font-weight:700; }
+.landmine-not-raised { color: var(--muted); }
+.landmine-not-raised .landmine-status { font-weight:400; }
+.briefing h3 { margin:20px 0 8px; font-size:18px; }
 .front-page { margin:48px 0; max-width:900px; background:var(--paper); padding:16px; }
 .front-page img { display:block; width:100%; height:auto; }

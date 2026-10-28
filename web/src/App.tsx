@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
-import type {
-  CreateScenarioResponse,
-  Debrief,
-  DebriefResponse,
-  GeneratedScenario,
-  ProvidersResponse,
-  ScenarioPreset,
+import {
+  ownerKnownLandmines,
+  type CreateScenarioResponse,
+  type Debrief,
+  type DebriefLandmineStatus,
+  type DebriefResponse,
+  type GeneratedScenario,
+  type ProvidersResponse,
+  type ScenarioPreset,
 } from "@hot-seat/shared";
 import { Session, type CameraStill } from "./Session.js";
 
@@ -183,6 +185,7 @@ export function App() {
       ) : view.kind === "debrief" ? (
         <DebriefView
           debrief={view.data.debrief}
+          scenario={view.built.scenario}
           frontPage={view.data.frontPage}
           sessionId={view.sessionId}
           onTryAgain={() =>
@@ -271,19 +274,29 @@ const SCORE_LABELS: Array<{ key: keyof Debrief["scores"]; label: string }> = [
   { key: "empathy", label: "Empathy" },
 ];
 
+const LANDMINE_STATUS_LABELS: Record<DebriefLandmineStatus, string> = {
+  disclosed_proactively: "Disclosed proactively",
+  raised_and_handled: "Raised and handled",
+  raised_and_fumbled: "Raised and fumbled",
+  not_raised: "Not raised",
+};
+
 function DebriefView({
   debrief,
+  scenario,
   frontPage: initialFrontPage,
   sessionId,
   onTryAgain,
   onNewCrisis,
 }: {
   debrief: Debrief;
+  scenario: GeneratedScenario;
   frontPage: DebriefResponse["frontPage"];
   sessionId: string | null;
   onTryAgain: () => void;
   onNewCrisis: () => void;
 }) {
+  const landmineFacts = new Map(scenario.landmines.map((m) => [m.id, m.fact]));
   const [frontPage, setFrontPage] = useState(initialFrontPage);
   const [printing, setPrinting] = useState(!initialFrontPage && sessionId !== null);
 
@@ -355,8 +368,11 @@ function DebriefView({
           <h2>Landmines</h2>
           <ul className="landmine-list">
             {debrief.landmines.map((l) => (
-              <li key={l.id}>
-                <strong>{l.id}</strong> {l.handled ? "Handled." : "Not handled."} {l.comment}
+              <li key={l.id} className={`landmine landmine-${l.status.replaceAll("_", "-")}`}>
+                <strong>{l.id}</strong>{" "}
+                <span className="landmine-status">{LANDMINE_STATUS_LABELS[l.status]}.</span>{" "}
+                {landmineFacts.get(l.id) && <span>{landmineFacts.get(l.id)} </span>}
+                {l.comment}
               </li>
             ))}
           </ul>
@@ -397,15 +413,29 @@ function DebriefView({
 
 function Briefing({ scenario, onTake, onChange }: { scenario: GeneratedScenario; onTake: () => void; onChange: () => void }) {
   const reporter = scenario.journalists[0];
+  const known = ownerKnownLandmines(scenario);
   return (
     <main>
       <h1 className="status-headline">Your briefing.</h1>
       <section className="paper briefing" aria-label="Briefing">
         <h2>{scenario.company.name}, {scenario.company.city}</h2>
         <p className="headline-q">{scenario.crisis.headline}</p>
+        <h3>What happened</h3>
         <ul className="briefing-list">
           {scenario.briefing_for_user.map((point, i) => (<li key={i}>{point}</li>))}
         </ul>
+        <h3>What&apos;s already public</h3>
+        <ul className="briefing-list">
+          {scenario.public_facts.map((fact, i) => (<li key={i}>{fact}</li>))}
+        </ul>
+        {known.length > 0 && (
+          <>
+            <h3>What you know that the press doesn&apos;t, yet</h3>
+            <ul className="briefing-list">
+              {known.map((m) => (<li key={m.id}>{m.fact}</li>))}
+            </ul>
+          </>
+        )}
         {reporter && <p>Who is coming: {reporter.name}, {reporter.outlet}</p>}
       </section>
       <p>
