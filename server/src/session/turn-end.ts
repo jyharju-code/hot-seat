@@ -4,6 +4,23 @@
 
 export const TURN_END_SILENCE_MS = 1000;
 export const TURN_END_HESITANT_MS = 3200;
+/** A partial unchanged for this long starts the speculative turn call. */
+export const PARTIAL_STABLE_MS = 450;
+
+/** Lowercase, punctuation removed, whitespace collapsed. */
+export function normaliseTranscript(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
+}
+
+/** True when two transcripts differ only in punctuation and casing. */
+export function transcriptsMatchNormalised(a: string, b: string): boolean {
+  return normaliseTranscript(a) === normaliseTranscript(b);
+}
+
+export function transcriptWordCount(text: string): number {
+  const n = normaliseTranscript(text);
+  return n ? n.split(" ").length : 0;
+}
 
 const SINGLE_FILLERS = new Set([
   "so",

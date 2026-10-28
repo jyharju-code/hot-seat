@@ -632,6 +632,106 @@ describe("Speculative turn (fake STT + fake LLM counting calls and aborts)", () 
   });
 });
 
+describe("Stable-partial speculative start (brief 09e)", () => {
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  async function startedPartial(delayMs = 10) {
+    const stt = new FakeStt();
+    const tts = new FakeTts();
+    const { messages, sink } = makeSink();
+    const calls: string[] = [];
+    let aborts = 0;
+    const brain = {
+      openingQuestion: async () => OPENING,
+      nextTurn: async (_s: unknown, _h: unknown, answer: string, _e?: number, signal?: AbortSignal) => {
+        calls.push(answer);
+        if (signal) {
+          await new Promise<void>((resolve, reject) => {
+            const t = setTimeout(resolve, delayMs);
+            signal.addEventListener("abort", () => { aborts += 1; clearTimeout(t); const e = new Error("aborted"); e.name = "AbortError"; reject(e); }, { once: true });
+          });
+        } else {
+          await wait(delayMs);
+        }
+        return { ...parseReporterLine(VALID), say: `Reply to: ${answer}` };
+      },
+    };
+    const orch = new SessionOrchestrator({
+      stt, brain: brain as never, tts, sink, scenario: cafeScenario, voiceId: "voice-1",
+      turnEndSilenceMs: 80, turnEndHesitantMs: 80, partialStableMs: 40,
+    });
+    await orch.start();
+    await orch.playbackDone();
+    const lastTiming = () => {
+      const t = messages.filter((m) => m.type === "timing").at(-1);
+      if (!t || t.type !== "timing") throw new Error("expected timing");
+      return t.timing;
+    };
+    return { stt, tts, messages, orch, calls, lastTiming, aborts: () => aborts };
+  }
+
+  it("stable partial starts the call; a short partial does not", async () => {
+    const h = await startedPartial();
+    const s = h.stt.sessions[0]!;
+    s.emit({ type: "partial", text: "We closed" });
+    await wait(90);
+    expect(h.calls).toEqual([]);
+    s.emit({ type: "partial", text: "We closed the cafe" });
+    await wait(15);
+    expect(h.calls).toEqual([]);
+    await wait(80);
+    expect(h.calls).toEqual(["We closed the cafe"]);
+    await h.orch.stop();
+  });
+
+  it("equal final (punctuation and casing only) keeps the partial-started call", async () => {
+    const h = await startedPartial();
+    const s = h.stt.sessions[0]!;
+    s.emit({ type: "partial", text: "We closed the cafe today." });
+    await wait(90);
+    expect(h.calls).toEqual(["We closed the cafe today."]);
+    s.emit({ type: "final", text: "we closed the cafe today" });
+    await wait(250);
+    expect(h.calls).toEqual(["We closed the cafe today."]);
+    expect(h.messages).toContainEqual({ type: "transcript", role: "user", text: "we closed the cafe today" });
+    expect(h.lastTiming().partialStartUsed).toBe(true);
+    await h.orch.stop();
+  });
+
+  it("different final restarts the call with the final text", async () => {
+    const h = await startedPartial();
+    const s = h.stt.sessions[0]!;
+    s.emit({ type: "partial", text: "We closed the cafe today." });
+    await wait(90);
+    expect(h.calls).toEqual(["We closed the cafe today."]);
+    s.emit({ type: "final", text: "We refunded every customer yesterday." });
+    await wait(250);
+    expect(h.calls).toEqual(["We closed the cafe today.", "We refunded every customer yesterday."]);
+    expect(h.lastTiming().partialStartUsed).toBe(false);
+    await h.orch.stop();
+  });
+
+  it("new partial words abort the in-flight partial-started call", async () => {
+    const h = await startedPartial(300);
+    const s = h.stt.sessions[0]!;
+    s.emit({ type: "partial", text: "We closed the cafe today." });
+    await wait(90);
+    expect(h.calls).toEqual(["We closed the cafe today."]);
+    s.emit({ type: "partial", text: "We closed the cafe today and refunded everyone" });
+    await wait(20);
+    expect(h.aborts()).toBe(1);
+    // After the new text is stable, a fresh call starts for it; the first
+    // reply is never spoken.
+    await wait(90);
+    expect(h.calls).toEqual(["We closed the cafe today.", "We closed the cafe today and refunded everyone"]);
+    s.emit({ type: "final", text: "We closed the cafe today and refunded everyone" });
+    await wait(500);
+    const reporterTexts = h.messages.filter((m) => m.type === "transcript" && m.role === "reporter").map((m) => (m.type === "transcript" ? m.text : ""));
+    expect(reporterTexts).not.toContain("Reply to: We closed the cafe today.");
+    expect(h.lastTiming().partialStartUsed).toBe(true);
+    await h.orch.stop();
+  });
+});
+
 /** STT session that fails like Muse Voice Transcribe after >1 s without audio. */
 class GapSession implements SttSession {
   pushed: Uint8Array[] = [];

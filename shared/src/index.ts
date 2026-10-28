@@ -104,6 +104,10 @@ export const turnTimingSchema = z.object({
   totalToFirstAudioMs: z.number().nonnegative(),
   /** True when TTS audio was buffered speculatively before the turn ended. */
   speculativeTtsUsed: z.boolean().default(false),
+  /** True when the used speculative turn call started from a stable partial. */
+  partialStartUsed: z.boolean().default(false),
+  /** Provider that won the turn race, or null when not raced. */
+  raceWinner: z.enum(["meta", "baseten"]).nullable().default(null),
 });
 export type TurnTiming = z.infer<typeof turnTimingSchema>;
 

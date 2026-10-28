@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  PARTIAL_STABLE_MS,
   TURN_END_HESITANT_MS,
   TURN_END_SILENCE_MS,
   isHesitantAnswer,
+  normaliseTranscript,
+  transcriptWordCount,
+  transcriptsMatchNormalised,
   turnEndSilenceMs,
 } from "../src/session/turn-end.js";
 
@@ -103,6 +107,15 @@ describe("adaptive turn-end silence", () => {
         hesitantMs: 900,
       }),
     ).toBe(100);
+  });
+
+  it("normalisation ignores punctuation and casing, and counts words", () => {
+    expect(PARTIAL_STABLE_MS).toBe(450);
+    expect(normaliseTranscript("  We Closed, the CAFE!  Today. ")).toBe("we closed the cafe today");
+    expect(transcriptsMatchNormalised("We closed the cafe today.", "we closed the cafe today")).toBe(true);
+    expect(transcriptsMatchNormalised("We closed the cafe today.", "We refunded everyone.")).toBe(false);
+    expect(transcriptWordCount("one two three")).toBe(3);
+    expect(transcriptWordCount("  ")).toBe(0);
   });
 
   it("empty text is not hesitant", () => {

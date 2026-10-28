@@ -4,7 +4,15 @@ import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
-import { TURN_END_HESITANT_MS, TURN_END_SILENCE_MS, turnEndSilenceMs, type SpeculativeState } from "./turn-end.js";
+import {
+  PARTIAL_STABLE_MS,
+  TURN_END_HESITANT_MS,
+  TURN_END_SILENCE_MS,
+  transcriptWordCount,
+  transcriptsMatchNormalised,
+  turnEndSilenceMs,
+  type SpeculativeState,
+} from "./turn-end.js";
 import { SpeculativeTtsBuffer } from "./speculative-tts.js";
 import {
   KEEPALIVE_DEFICIT_MS,
@@ -21,11 +29,15 @@ export interface ClientSink {
 
 export interface OrchestratorDeps {
   stt: SpeechToText;
-  brain: Pick<JournalistBrain, "openingQuestion" | "nextTurn">;
+  brain: Pick<JournalistBrain, "openingQuestion" | "nextTurn"> & {
+    readonly lastRaceWinner?: "meta" | "baseten" | null;
+  };
   tts: TextToSpeech;
   sink: ClientSink;
   scenario: BrainScenario;
   voiceId: string;
+  /** Partial unchanged for this long starts the speculative call. Default 450. */
+  partialStableMs?: number;
   /** Silence after the last final/partial before the turn ends. Default 1000. */
   turnEndSilenceMs?: number;
   /** Extended silence when the answer looks unfinished. Default 3200. */
@@ -111,6 +123,8 @@ export class SessionOrchestrator {
     settled: boolean;
     failed: boolean;
     ttsBuffer: SpeculativeTtsBuffer | null;
+    fromPartial: boolean;
+    raceWinner: "meta" | "baseten" | null;
   } | null = null;
   private awaitingPlayback = false;
   private keepAlive: SttKeepAliveTracker | null = null;
@@ -375,6 +389,10 @@ export class SessionOrchestrator {
     // Raw cumulative partial of the current STT segment, not yet a final.
     // Sealed into `parts` when its session dies (see sessionDead handling).
     let pendingPartial = "";
+    // Stable-partial tracking: text last seen and when it last changed.
+    let partialCandidate = "";
+    let partialCandidateSince: number | null = null;
+    const partialStableMs = this.deps.partialStableMs ?? PARTIAL_STABLE_MS;
     let answerStartedAt: number | null = null;
     let lastDecisionAt: number | null = null;
     let lastDecisionText = "";
@@ -442,7 +460,40 @@ export class SessionOrchestrator {
         const nextP = iter.next();
         let result: IteratorResult<SttEvent>;
         if (parts.length === 0) {
-          result = await nextP;
+          const eligible =
+            partialCandidateSince !== null &&
+            transcriptWordCount(partialCandidate) >= 3 &&
+            !(this.speculative && transcriptsMatchNormalised(this.speculative.answer, partialCandidate));
+          if (!eligible) {
+            result = await nextP;
+          } else {
+            const STABLE = Symbol("stable");
+            let resolved0: IteratorResult<SttEvent> | null = null;
+            while (!this.stopped && !resolved0) {
+              const remainingStable = partialStableMs - (this.now() - (partialCandidateSince ?? this.now()));
+              if (remainingStable <= 0) {
+                this.startSpeculative(partialCandidate, true);
+                resolved0 = await nextP;
+                break;
+              }
+              let timer0: ReturnType<typeof setTimeout> | undefined;
+              const raced0 = await Promise.race([
+                nextP,
+                new Promise<typeof STABLE>((resolve) => {
+                  timer0 = setTimeout(() => resolve(STABLE), remainingStable);
+                }),
+              ]);
+              if (timer0) clearTimeout(timer0);
+              if (raced0 === STABLE) {
+                this.startSpeculative(partialCandidate, true);
+                resolved0 = await nextP;
+                break;
+              }
+              resolved0 = raced0 as IteratorResult<SttEvent>;
+            }
+            if (!resolved0) break;
+            result = resolved0;
+          }
         } else {
           const TIMEOUT = Symbol("silence");
           const SPEC = Symbol("speculative");
@@ -506,7 +557,6 @@ export class SessionOrchestrator {
           sessionDead = true;
         } else if (ev.type === "partial") {
           this.noteSpeech();
-          if (parts.length > 0) this.abortSpeculative();
           const text = ev.text.trim();
           if (text) {
             if (answerStartedAt === null) answerStartedAt = this.now();
@@ -514,6 +564,17 @@ export class SessionOrchestrator {
             // Prefix with collected finals / sealed segments, so a partial
             // from a reopened session continues the full answer text.
             latestPartial = [...parts, text].join(" ");
+            if (latestPartial !== partialCandidate) {
+              // New words (or a revision): any in-flight speculative call
+              // was started on different text, so abort it as before.
+              if (this.speculative && !transcriptsMatchNormalised(this.speculative.answer, latestPartial)) {
+                this.abortSpeculative();
+              } else if (parts.length > 0 && this.speculative) {
+                this.abortSpeculative();
+              }
+              partialCandidate = latestPartial;
+              partialCandidateSince = this.now();
+            }
             maybeDecide(latestPartial);
           }
           continue;
@@ -526,8 +587,15 @@ export class SessionOrchestrator {
           pendingPartial = "";
           latestPartial = parts.join(" ");
           lastFinalAt = this.now();
+          partialCandidate = latestPartial;
+          partialCandidateSince = null;
           maybeDecide(latestPartial);
-          this.startSpeculative(parts.join(" "));
+          if (this.speculative && transcriptsMatchNormalised(this.speculative.answer, latestPartial)) {
+            // Kept: align to the exact final text for handleFinal's check.
+            this.speculative.answer = latestPartial;
+          } else {
+            this.startSpeculative(parts.join(" "));
+          }
         }
       }
       if (this.stopped) return;
@@ -572,7 +640,7 @@ export class SessionOrchestrator {
   }
 
   /** Start the journalist LLM at once, during the turn-end silence window. */
-  private startSpeculative(answer: string): void {
+  private startSpeculative(answer: string, fromPartial = false): void {
     this.speculative?.controller.abort();
     const controller = new AbortController();
     if (this.signal.aborted) controller.abort();
@@ -597,11 +665,14 @@ export class SessionOrchestrator {
       settled: false,
       failed: false,
       ttsBuffer: null as SpeculativeTtsBuffer | null,
+      fromPartial,
+      raceWinner: null as "meta" | "baseten" | null,
     };
     this.speculative = spec;
     promise.then(
       (line) => {
         spec.settled = true;
+        spec.raceWinner = this.deps.brain.lastRaceWinner ?? null;
         spec.ownerDone = line.owner_done ?? null;
         if (this.speculative !== spec || this.stopped) return;
         if (line.owner_done === true) {
@@ -728,6 +799,8 @@ export class SessionOrchestrator {
     const escalation = this.takeDueEscalation();
     let line: ReporterLine;
     let speculativeBuffer: SpeculativeTtsBuffer | null = null;
+    let partialStartUsed = false;
+    let raceWinner: "meta" | "baseten" | null = null;
     try {
       if (escalation) {
         // The speculative reply was generated without the new fact.
@@ -758,6 +831,7 @@ export class SessionOrchestrator {
         await this.speakNews(escalation.news_flash);
         if (this.stopped) return;
         line = await linePromise;
+        raceWinner = this.deps.brain.lastRaceWinner ?? null;
         if (this.stopped) return;
       } else if (this.speculative && this.speculative.answer === userText) {
         // Never speak a reply generated from a shorter answer than the final one.
@@ -765,6 +839,8 @@ export class SessionOrchestrator {
         const pending = spec.promise;
         this.speculative = null;
         line = await pending;
+        partialStartUsed = spec.fromPartial;
+        raceWinner = spec.raceWinner ?? this.deps.brain.lastRaceWinner ?? null;
         // Audio buffered for this exact line may be flushed now, and only now.
         if (spec.ttsBuffer && spec.ttsBuffer.text === line.say && !spec.ttsBuffer.isDiscarded && !spec.ttsBuffer.error) {
           speculativeBuffer = spec.ttsBuffer;
@@ -781,6 +857,7 @@ export class SessionOrchestrator {
           this.signal,
           [...this.learnedEscalations],
         );
+        raceWinner = this.deps.brain.lastRaceWinner ?? null;
       }
       if (this.stopped) return;
     } catch (err) {
@@ -800,7 +877,7 @@ export class SessionOrchestrator {
     this.history.push({ role: "reporter", text: line.say });
     let timing: TurnTiming;
     try {
-      timing = await this.speak(line, speechEndAt, finalAt, llmAt, speculativeBuffer);
+      timing = await this.speak(line, speechEndAt, finalAt, llmAt, speculativeBuffer, partialStartUsed, raceWinner);
     } catch (err) {
       if (this.stopped) return;
       this.fail(err);
@@ -812,7 +889,7 @@ export class SessionOrchestrator {
     this.log(
       `[turn ${timing.turn}] speechEnd->final ${Math.round(timing.speechEndToFinalMs)}ms ` +
         `speechEnd->llm ${Math.round(timing.speechEndToLlmMs)}ms ` +
-        `speechEnd->firstAudio ${Math.round(timing.speechEndToFirstAudioMs)}ms totalToVoice ${Math.round(timing.totalToFirstAudioMs)}ms speculativeTtsUsed=${timing.speculativeTtsUsed}`,
+        `speechEnd->firstAudio ${Math.round(timing.speechEndToFirstAudioMs)}ms totalToVoice ${Math.round(timing.totalToFirstAudioMs)}ms speculativeTtsUsed=${timing.speculativeTtsUsed} partialStartUsed=${timing.partialStartUsed} raceWinner=${timing.raceWinner ?? "none"}`,
     );
     // Wait for playback_done before opening the next STT session.
     if (!this.stopped) this.awaitingPlayback = true;
@@ -825,6 +902,8 @@ export class SessionOrchestrator {
     finalAt: number,
     llmAt: number,
     speculativeBuffer: SpeculativeTtsBuffer | null = null,
+    partialStartUsed = false,
+    raceWinner: "meta" | "baseten" | null = null,
   ): Promise<TurnTiming> {
     this.deps.sink.send({ type: "reporter_line", line });
     this.deps.sink.send({ type: "transcript", role: "reporter", text: stripAudioTags(line.say) });
@@ -851,6 +930,8 @@ export class SessionOrchestrator {
       speechEndToFirstAudioMs: Math.max(0, first - speechEndAt),
       totalToFirstAudioMs: Math.max(0, first - speechEndAt),
       speculativeTtsUsed: speculativeBuffer !== null,
+      partialStartUsed,
+      raceWinner,
     };
   }
 }

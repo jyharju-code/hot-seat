@@ -24,6 +24,21 @@ Note: in a live session the speculative turn starts the LLM on the first
 final STT segment, during the turn-end silence window, so much of this
 latency is hidden behind the 1.5 s silence before the reply is spoken.
 
+## Brief 09e: provider race and stable-partial start (numbers pending)
+
+Turn calls now race Meta and Baseten from the same instant when both keys
+are configured and `TURN_RACE=on` (default), logging
+`race: winner=<meta|baseten> ms=<n> loser_ms=<n|aborted>`; `TURN_RACE=off`
+keeps the previous 1.8 s hedge. Interrupt decisions race the same way, and
+scenario, debrief and image calls stay on Meta only. The speculative turn
+also starts from a partial transcript that has been unchanged for
+`PARTIAL_STABLE_MS` (default 450 ms) with at least 3 words, instead of
+waiting for the final `speechComplete`; a final that matches the partial
+after normalisation (lowercase, punctuation removed) keeps that call, and
+a different final restarts it. Per-turn timing now records
+`partialStartUsed` and `raceWinner`. The director will fill in the
+measured medians from the next sim run here.
+
 ## Scenario generation speed (`npm run smoke:scenario-speed`)
 
 Each configuration generated the `cafe_food` and `contractor_delay`
