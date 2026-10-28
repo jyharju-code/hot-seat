@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReporterLine, ServerMessage, SessionState, TurnTiming } from "@hot-seat/shared";
-import { serverMessageSchema, stripAudioTags } from "@hot-seat/shared";
+import { CONNECTION_HICCUP_MESSAGE, serverMessageSchema, stripAudioTags } from "@hot-seat/shared";
 import { PcmPlayer } from "./audio/pcm-player.js";
 import { connectionLostUpdate } from "./session-connection.js";
 
@@ -30,6 +30,7 @@ export function Session({
   const [entries, setEntries] = useState<Entry[]>([]);
   const [newsFlash, setNewsFlash] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [expired, setExpired] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
   const [endedMessage, setEndedMessage] = useState("");
@@ -198,7 +199,10 @@ export function Session({
     } else if (msg.type === "timing") {
       setEntries((e) => { const c = [...e]; for (let i = c.length - 1; i >= 0; i--) { if (c[i]?.role === "reporter") { c[i] = { ...c[i]!, timing: msg.timing }; break; } } return c; });
     } else if (msg.type === "error") {
-      if (/expired|Unknown scenarioId/i.test(msg.message)) {
+      if (msg.message === CONNECTION_HICCUP_MESSAGE) {
+        setError("");
+        setNotice(CONNECTION_HICCUP_MESSAGE);
+      } else if (/expired|Unknown scenarioId/i.test(msg.message)) {
         setExpired(true);
         setError("This scenario has expired. Build it again.");
       } else setError(msg.message);
@@ -216,6 +220,7 @@ export function Session({
       <h1 className="status-headline">{live ? <>Live. <span className="live-dot" aria-label="live" /></> : "Ready."} <span className="clock">{fmtClock(elapsed)}</span></h1>
       <p className="muted">{live ? statusText : "Starting microphone."}</p>
       {error && <p className="error">{error}</p>}
+      {notice && <p className="muted">{notice}</p>}
       {endedMessage && <p className="muted">{endedMessage}</p>}
       {connectionLost && (
         <p>
@@ -239,7 +244,7 @@ export function Session({
         {entries.length === 0 && <p className="muted">Nothing yet.</p>}
         <ul>{entries.map((e, i) => (<li key={i} className="t-entry"><span><strong>{e.role === "reporter" ? "Reporter: " : e.role === "news" ? "News: " : "You: "}</strong>{e.text}{e.timing && <span className="timing">{` ${(e.timing.totalToFirstAudioMs / 1000).toFixed(1)} s to voice`}</span>}</span></li>))}</ul>
       </section>
-      <p><button className="primary" type="button" onClick={end}>End</button></p>
+      <p><button className={endedMessage ? "primary end-highlight" : "primary"} type="button" onClick={end} autoFocus={Boolean(endedMessage)}>End</button></p>
     </main>
   );
 }

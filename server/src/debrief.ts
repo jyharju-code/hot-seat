@@ -47,11 +47,13 @@ export class DebriefCoach {
   private readonly llm: Llm;
   private readonly model: string;
   private readonly reasoningEffort: string;
+  private readonly log: (line: string) => void;
 
-  constructor(llm: Llm, model = "muse-wonder-1.0", reasoningEffort = "medium") {
+  constructor(llm: Llm, model = "muse-wonder-1.0", reasoningEffort = "medium", log?: (line: string) => void) {
     this.llm = llm;
     this.model = model;
     this.reasoningEffort = reasoningEffort;
+    this.log = log ?? (() => undefined);
   }
 
   async generate(
@@ -69,14 +71,23 @@ export class DebriefCoach {
       events: formatEvents(turns),
       language,
     });
-    return this.llm.generateStructured({
-      prompt,
-      // Structured JSON plus reasoning: well above the minimum.
-      maxTokens: Math.max(8000, MIN_REASONING_MAX_TOKENS),
-      model: this.model,
-      reasoningEffort: this.reasoningEffort,
-      parse: (raw) => debriefSchema.parse(raw),
-    });
+    this.log(`[debrief] prompt chars=${prompt.length}`);
+    const callStarted = performance.now();
+    try {
+      const result = await this.llm.generateStructured({
+        prompt,
+        // Structured JSON plus reasoning: well above the minimum.
+        maxTokens: Math.max(8000, MIN_REASONING_MAX_TOKENS),
+        model: this.model,
+        reasoningEffort: this.reasoningEffort,
+        parse: (raw) => debriefSchema.parse(raw),
+      });
+      this.log(`[debrief] model call ${Math.round(performance.now() - callStarted)}ms`);
+      return result;
+    } catch (err) {
+      this.log(`[debrief] model call failed after ${Math.round(performance.now() - callStarted)}ms`);
+      throw err;
+    }
   }
 }
 

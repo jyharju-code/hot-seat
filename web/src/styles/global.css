@@ -54,6 +54,7 @@ main { padding: 48px 32px; max-width: 1100px; }
   cursor: pointer;
 }
 .primary:disabled { opacity: 0.45; cursor: not-allowed; }
+.end-highlight { outline: 3px solid var(--error); outline-offset: 3px; }
 
 .paper {
   background: var(--paper);

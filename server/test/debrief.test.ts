@@ -94,6 +94,19 @@ describe("debrief prompt", () => {
   });
 });
 
+describe("debrief timing logs (brief 11)", () => {
+  it("logs prompt size and model call time separately", async () => {
+    const logs: string[] = [];
+    const coach = new DebriefCoach({
+      chat: async () => { throw new Error("unused"); },
+      generateStructured: async (input) => input.parse(sampleDebrief),
+    }, "muse-wonder-1.0", "medium", (l) => logs.push(l));
+    await coach.generate(cafeTestScenario, turns, "en");
+    expect(logs.some((l) => /^\[debrief\] prompt chars=\d+$/.test(l))).toBe(true);
+    expect(logs.some((l) => /^\[debrief\] model call \d+ms$/.test(l))).toBe(true);
+  });
+});
+
 describe("transcript formatting", () => {
   it("formats mm:ss", () => {
     expect(formatMmSs(0)).toBe("00:00");

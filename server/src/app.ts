@@ -89,6 +89,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
         new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: "muse-wonder-1.0" }),
         "muse-wonder-1.0",
         "medium",
+        (line) => app.log.info(line),
       );
       return coach.generate(scenario, turns, language);
     });
