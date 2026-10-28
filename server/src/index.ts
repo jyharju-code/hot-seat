@@ -81,6 +81,7 @@ wss.on("connection", (ws: WebSocket) => {
             },
             scenario: cafeScenario,
             voiceId: voice.voiceId,
+            turnEndSilenceMs: config.TURN_END_SILENCE_MS,
             log: (line) => app.log.info(line),
           });
           await orchestrator.start();

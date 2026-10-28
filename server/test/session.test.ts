@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ReporterLine, ServerMessage } from "@hot-seat/shared";
 import { JournalistBrain, parseReporterLine, type JournalistPrompts } from "../src/journalist.js";
 import type { Llm, LlmChatResult } from "../src/providers/llm.js";
@@ -133,26 +133,31 @@ describe("JournalistBrain", () => {
 });
 
 describe("SessionOrchestrator (fake adapters)", () => {
-  async function started(brainOverride?: { nextTurn: () => Promise<ReporterLine> }) {
+  async function started(brainOverride?: { nextTurn?: (scenario: unknown, history: unknown, answer: string) => Promise<ReporterLine>; turnEndSilenceMs?: number }) {
     const stt = new FakeStt();
     const tts = new FakeTts();
     const { messages, audio, sink } = makeSink();
+    const brainCalls: string[] = [];
     const brain = {
       openingQuestion: async () => OPENING,
-      nextTurn: brainOverride?.nextTurn ?? (async () => parseReporterLine(VALID)),
+      nextTurn: async (_s: unknown, _h: unknown, answer: string) => {
+        brainCalls.push(answer);
+        return brainOverride?.nextTurn ? brainOverride.nextTurn(_s, _h, answer) : parseReporterLine(VALID);
+      },
     };
     const logs: string[] = [];
     const orch = new SessionOrchestrator({
       stt,
-      brain,
+      brain: brain as never,
       tts,
       sink,
       scenario: cafeScenario,
       voiceId: "voice-1",
+      turnEndSilenceMs: brainOverride?.turnEndSilenceMs ?? 0,
       log: (l) => logs.push(l),
     });
     await orch.start();
-    return { stt, tts, messages, audio, orch, logs };
+    return { stt, tts, messages, audio, orch, logs, brainCalls };
   }
 
   it("speaks the opening, then listens (state order thinking/speaking/listening)", async () => {
@@ -196,6 +201,65 @@ describe("SessionOrchestrator (fake adapters)", () => {
     expect(logs.some((l) => l.includes("[turn 1]"))).toBe(true);
   });
 
+  it("concatenates two finals 600 ms apart into one turn (1500 ms silence)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { stt, messages, brainCalls } = await started({ turnEndSilenceMs: 1500 });
+      const s = stt.sessions[0]!;
+      s.emit({ type: "final", text: "We take this extremely seriously." });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(brainCalls).toHaveLength(0);
+      s.emit({ type: "final", text: "We pulled the pastries that morning." });
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(brainCalls).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(brainCalls).toEqual(["We take this extremely seriously. We pulled the pastries that morning."]);
+      expect(messages).toContainEqual({
+        type: "transcript",
+        role: "user",
+        text: "We take this extremely seriously. We pulled the pastries that morning.",
+      });
+      // Same STT session served the whole turn; a fresh one opened only after speaking.
+      expect(stt.sessions.length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a 1500 ms gap after a final ends the turn; a partial postpones it", async () => {
+    vi.useFakeTimers();
+    try {
+      const { stt, brainCalls } = await started({ turnEndSilenceMs: 1500 });
+      const s = stt.sessions[0]!;
+      s.emit({ type: "final", text: "First part." });
+      await vi.advanceTimersByTimeAsync(1000);
+      s.emit({ type: "partial", text: "First part. And" });
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(brainCalls).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(brainCalls).toEqual(["First part."]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores empty and whitespace-only finals (no LLM call, no turn)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { stt, messages, brainCalls, orch } = await started({ turnEndSilenceMs: 1500 });
+      const s = stt.sessions[0]!;
+      s.emit({ type: "final", text: "" });
+      s.emit({ type: "final", text: "   " });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(brainCalls).toHaveLength(0);
+      expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+      expect(orch.currentState).toBe("listening");
+      expect(stt.sessions).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("half duplex: mic frames are dropped while not listening", async () => {
     let releaseBrain!: (line: ReporterLine) => void;
     const gate = new Promise<ReporterLine>((r) => {
@@ -207,6 +271,7 @@ describe("SessionOrchestrator (fake adapters)", () => {
     expect(first.pushed).toHaveLength(1);
     first.emit({ type: "endpoint" });
     first.emit({ type: "final", text: "Answer.", turnId: "t1" });
+    await tick();
     await tick();
     expect(orch.currentState).toBe("thinking");
     orch.pushAudio(new Uint8Array([2]));

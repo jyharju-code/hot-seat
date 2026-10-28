@@ -12,6 +12,7 @@ const envSchema = z.object({
   BASETEN_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   LLM_CHAT_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   LLM_STRUCTURED_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  TURN_END_SILENCE_MS: z.coerce.number().int().positive().max(60_000).default(1500),
 });
 
 export type Config = z.infer<typeof envSchema> & {
