@@ -6,7 +6,18 @@ import { PcmPlayer } from "./audio/pcm-player.js";
 interface Entry { role: "user" | "reporter"; text: string; timing?: TurnTiming }
 const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
-export function Session({ scenarioId, onEnd }: { scenarioId: string; onEnd: () => void }) {
+export interface CameraStill {
+  base64: string;
+  mime: string;
+}
+
+export function Session({
+  scenarioId,
+  onEnd,
+}: {
+  scenarioId: string;
+  onEnd: (still: CameraStill | null) => void;
+}) {
   const [live, setLive] = useState(false);
   const [state, setState] = useState<SessionState | null>(null);
   const [question, setQuestion] = useState("");
@@ -21,6 +32,7 @@ export function Session({ scenarioId, onEnd }: { scenarioId: string; onEnd: () =
   const playerRef = useRef<PcmPlayer | null>(null);
   const endTimerRef = useRef<number | undefined>(undefined);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const stillRef = useRef<CameraStill | null>(null);
 
   useEffect(() => { stateRef.current = state; }, [state]);
   useEffect(() => {
@@ -35,9 +47,60 @@ export function Session({ scenarioId, onEnd }: { scenarioId: string; onEnd: () =
     cleanupRef.current = () => locals.forEach((f) => f());
     void (async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        // Ask for camera together with the mic. Nothing of the video is
+        // shown; one still is grabbed about 20 s in and kept in memory.
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true },
+            video: { width: 1280 },
+          });
+        } catch {
+          // Camera denied (or absent): continue with the mic alone.
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true },
+          });
+        }
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
         locals.push(() => stream.getTracks().forEach((t) => t.stop()));
+        if (stream.getVideoTracks().length > 0) {
+          const video = document.createElement("video");
+          video.muted = true;
+          video.playsInline = true;
+          video.srcObject = stream;
+          void video.play().catch(() => undefined);
+          const stillTimer = window.setTimeout(() => {
+            try {
+              const width = video.videoWidth || 1280;
+              const height = video.videoHeight || Math.round((width * 3) / 4);
+              if (!width || !height) return;
+              const canvas = document.createElement("canvas");
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext("2d");
+              if (!ctx) return;
+              ctx.drawImage(video, 0, 0, width, height);
+              canvas.toBlob(
+                (blob) => {
+                  if (!blob) return;
+                  void blob.arrayBuffer().then((buf) => {
+                    let binary = "";
+                    const bytes = new Uint8Array(buf);
+                    for (let i = 0; i < bytes.length; i += 0x8000) {
+                      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+                    }
+                    stillRef.current = { base64: btoa(binary), mime: "image/jpeg" };
+                  });
+                },
+                "image/jpeg",
+                0.85,
+              );
+            } catch {
+              /* no still: the session continues without it */
+            }
+          }, 20_000);
+          locals.push(() => window.clearTimeout(stillTimer));
+        }
         const micCtx = new AudioContext();
         locals.push(() => void micCtx.close().catch(() => undefined));
         await micCtx.audioWorklet.addModule("/mic-worklet.js");
@@ -103,7 +166,8 @@ export function Session({ scenarioId, onEnd }: { scenarioId: string; onEnd: () =
   }
   function end() {
     try { wsRef.current?.send(JSON.stringify({ type: "stop" })); } catch { /* closed */ }
-    cleanupRef.current?.(); setLive(false); onEnd();
+    const still = stillRef.current;
+    cleanupRef.current?.(); setLive(false); onEnd(still);
   }
   const statusText = state === "thinking" ? "Thinking." : state === "speaking" ? "Speaking." : state === "listening" ? "Listening." : "Connecting.";
   return (

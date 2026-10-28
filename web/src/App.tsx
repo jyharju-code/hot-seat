@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
-import type { CreateScenarioResponse, GeneratedScenario, ProvidersResponse, ScenarioPreset } from "@hot-seat/shared";
-import { Session } from "./Session.js";
+import type {
+  CreateScenarioResponse,
+  Debrief,
+  DebriefResponse,
+  GeneratedScenario,
+  ProvidersResponse,
+  ScenarioPreset,
+} from "@hot-seat/shared";
+import { Session, type CameraStill } from "./Session.js";
 
 type LoadState =
   | { kind: "loading" }
@@ -13,7 +20,10 @@ type View =
   | { kind: "building"; description: string; startedAt: number }
   | { kind: "buildError"; description: string; message: string }
   | { kind: "briefing"; built: CreateScenarioResponse }
-  | { kind: "session"; built: CreateScenarioResponse };
+  | { kind: "session"; built: CreateScenarioResponse; runId: number }
+  | { kind: "debriefing"; built: CreateScenarioResponse; still: CameraStill | null; startedAt: number }
+  | { kind: "debrief"; built: CreateScenarioResponse; data: DebriefResponse }
+  | { kind: "debriefError"; built: CreateScenarioResponse; still: CameraStill | null; message: string };
 
 export function App() {
   const [view, setView] = useState<View>({ kind: "home" });
@@ -77,6 +87,47 @@ export function App() {
     return () => { cancelled = true; window.clearInterval(id); };
   }, [view.kind === "building" ? view.startedAt : 0]);
 
+  useEffect(() => {
+    if (view.kind !== "debriefing") return;
+    setElapsed(0);
+    const id = window.setInterval(
+      () => setElapsed(Math.floor((Date.now() - view.startedAt) / 1000)),
+      250,
+    );
+    let cancelled = false;
+    const still = view.still;
+    fetch(`/api/sessions/${view.built.id}/debrief`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        language: "en",
+        ...(still ? { stillBase64: still.base64, stillMime: still.mime } : {}),
+      }),
+    })
+      .then(async (res) => {
+        const data = (await res.json()) as DebriefResponse & { error?: string };
+        if (!res.ok) throw new Error(data.error ?? `Server replied ${res.status}`);
+        return data;
+      })
+      .then((data) => {
+        if (!cancelled) setView({ kind: "debrief", built: view.built, data });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setView({
+            kind: "debriefError",
+            built: view.built,
+            still,
+            message: err instanceof Error ? err.message : "Debrief generation failed.",
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [view.kind === "debriefing" ? view.startedAt : 0]);
+
   const build = (text: string) => setView({ kind: "building", description: text, startedAt: Date.now() });
 
   return (
@@ -88,7 +139,52 @@ export function App() {
         </nav>
       </header>
       {view.kind === "session" ? (
-        <Session scenarioId={view.built.id} onEnd={() => setView({ kind: "briefing", built: view.built })} />
+        <Session
+          key={view.runId}
+          scenarioId={view.built.id}
+          onEnd={(still) =>
+            setView({ kind: "debriefing", built: view.built, still, startedAt: Date.now() })
+          }
+        />
+      ) : view.kind === "debriefing" ? (
+        <main>
+          <h1 className="status-headline">Debrief.</h1>
+          <p className="lede">Writing your debrief and tomorrow&apos;s front page. {elapsed} s</p>
+          <p className="muted">This can take a minute.</p>
+        </main>
+      ) : view.kind === "debriefError" ? (
+        <main>
+          <h1 className="status-headline">Debrief.</h1>
+          <p className="error">{view.message}</p>
+          <p>
+            <button
+              className="primary"
+              type="button"
+              onClick={() =>
+                setView({
+                  kind: "debriefing",
+                  built: view.built,
+                  still: view.still,
+                  startedAt: Date.now(),
+                })
+              }
+            >
+              Try again
+            </button>{" "}
+            <button className="linklike" type="button" onClick={() => setView({ kind: "setup" })}>
+              New crisis
+            </button>
+          </p>
+        </main>
+      ) : view.kind === "debrief" ? (
+        <DebriefView
+          debrief={view.data.debrief}
+          frontPage={view.data.frontPage}
+          onTryAgain={() =>
+            setView({ kind: "session", built: view.built, runId: Date.now() })
+          }
+          onNewCrisis={() => setView({ kind: "setup" })}
+        />
       ) : view.kind === "building" ? (
         <main>
           <h1 className="status-headline">Building.</h1>
@@ -105,7 +201,7 @@ export function App() {
           </p>
         </main>
       ) : view.kind === "briefing" ? (
-        <Briefing scenario={view.built.scenario} onTake={() => setView({ kind: "session", built: view.built })} onChange={() => setView({ kind: "setup" })} />
+        <Briefing scenario={view.built.scenario} onTake={() => setView({ kind: "session", built: view.built, runId: Date.now() })} onChange={() => setView({ kind: "setup" })} />
       ) : view.kind === "setup" ? (
         <main>
           <h1 className="status-headline">Your crisis.</h1>
@@ -159,6 +255,111 @@ export function App() {
         </section>
       </main>)}
     </>
+  );
+}
+
+const SCORE_LABELS: Array<{ key: keyof Debrief["scores"]; label: string }> = [
+  { key: "clarity", label: "Clarity" },
+  { key: "accountability", label: "Accountability" },
+  { key: "composure", label: "Composure" },
+  { key: "message_discipline", label: "Message discipline" },
+  { key: "empathy", label: "Empathy" },
+];
+
+function DebriefView({
+  debrief,
+  frontPage,
+  onTryAgain,
+  onNewCrisis,
+}: {
+  debrief: Debrief;
+  frontPage: DebriefResponse["frontPage"];
+  onTryAgain: () => void;
+  onNewCrisis: () => void;
+}) {
+  return (
+    <main>
+      <h1 className="status-headline">Debrief.</h1>
+      <p className="lede">{debrief.verdict}</p>
+
+      <section className="debrief-scores" aria-label="Scores">
+        {SCORE_LABELS.map(({ key, label }) => (
+          <div key={key} className="score-row">
+            <span className="score-label">{label}</span>
+            <span className="score-value">{debrief.scores[key]}</span>
+          </div>
+        ))}
+      </section>
+
+      {debrief.best_moments.length > 0 && (
+        <section className="debrief-section" aria-label="Best moments">
+          <h2>Best moments</h2>
+          {debrief.best_moments.map((m, i) => (
+            <article key={i} className="moment">
+              <p className="moment-t">{m.t}</p>
+              <blockquote className="moment-quote">&ldquo;{m.quote}&rdquo;</blockquote>
+              <p>{m.why}</p>
+            </article>
+          ))}
+        </section>
+      )}
+
+      {debrief.worst_moments.length > 0 && (
+        <section className="debrief-section" aria-label="Worst moments">
+          <h2>Worst moments</h2>
+          {debrief.worst_moments.map((m, i) => (
+            <article key={i} className="moment">
+              <p className="moment-t">{m.t}</p>
+              <blockquote className="moment-quote">&ldquo;{m.quote}&rdquo;</blockquote>
+              <p>{m.why}</p>
+              <p>
+                <strong>Better:</strong> &ldquo;{m.better}&rdquo;
+              </p>
+            </article>
+          ))}
+        </section>
+      )}
+
+      {debrief.landmines.length > 0 && (
+        <section className="debrief-section" aria-label="Landmines">
+          <h2>Landmines</h2>
+          <ul className="landmine-list">
+            {debrief.landmines.map((l) => (
+              <li key={l.id}>
+                <strong>{l.id}</strong> {l.handled ? "Handled." : "Not handled."} {l.comment}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section className="debrief-section" aria-label="One thing to practise">
+        <h2>One thing to practise</h2>
+        <p className="lede">{debrief.one_thing_to_practice}</p>
+      </section>
+
+      {frontPage ? (
+        <figure className="front-page">
+          <img
+            src={`data:${frontPage.mime};base64,${frontPage.imageBase64}`}
+            alt={`Tomorrow's front page: ${debrief.front_page.headline}`}
+          />
+        </figure>
+      ) : (
+        <p className="muted">Tomorrow&apos;s front page could not be made this time.</p>
+      )}
+
+      <p>
+        <button className="primary" type="button" onClick={onTryAgain}>
+          Try again
+        </button>
+      </p>
+      <p>
+        <button className="linklike" type="button" onClick={onNewCrisis}>
+          New crisis
+        </button>
+      </p>
+    </main>
   );
 }
 
