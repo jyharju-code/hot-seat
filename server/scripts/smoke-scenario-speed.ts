@@ -14,6 +14,7 @@ loadDotenv();
 
 import { generatedScenarioSchema } from "@hot-seat/shared";
 import { MetaLlm } from "../src/providers/index.js";
+import { MIN_REASONING_MAX_TOKENS } from "../src/providers/llm.js";
 import { fillTemplate, loadPrompt } from "../src/prompts.js";
 import { presets } from "../src/scenarios/presets.js";
 
@@ -48,6 +49,7 @@ async function main(): Promise<void> {
           prompt: preset.description,
           system,
           model: cfg.model,
+          maxTokens: Math.max(8000, MIN_REASONING_MAX_TOKENS),
           reasoningEffort: cfg.reasoning,
           parse: (raw) => {
             captured = raw;

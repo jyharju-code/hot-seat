@@ -3,7 +3,7 @@ import {
   type Debrief,
   type GeneratedScenario,
 } from "@hot-seat/shared";
-import type { Llm } from "./providers/llm.js";
+import { MIN_REASONING_MAX_TOKENS, type Llm } from "./providers/llm.js";
 import type { ImageGen, ImageResult } from "./providers/image-gen.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
 import { formatEvents, formatTranscript, type TimedTurn } from "./session/store.js";
@@ -40,6 +40,8 @@ export class DebriefCoach {
     });
     return this.llm.generateStructured({
       prompt,
+      // Structured JSON plus reasoning: well above the minimum.
+      maxTokens: Math.max(8000, MIN_REASONING_MAX_TOKENS),
       model: this.model,
       reasoningEffort: this.reasoningEffort,
       parse: (raw) => debriefSchema.parse(raw),

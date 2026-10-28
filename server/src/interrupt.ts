@@ -1,4 +1,4 @@
-import type { Llm } from "./providers/llm.js";
+import { MIN_REASONING_MAX_TOKENS, type Llm } from "./providers/llm.js";
 import { fillTemplate } from "./prompts.js";
 
 export interface InterruptDecision {
@@ -52,7 +52,7 @@ export class LlmInterruptDecider implements InterruptDecider {
     const result = await this.llm.chat({
       model: this.model,
       messages: [{ role: "user", content: prompt }],
-      maxTokens: 200,
+      maxTokens: MIN_REASONING_MAX_TOKENS,
       reasoningEffort: "minimal",
       ...(signal ? { signal } : {}),
     });

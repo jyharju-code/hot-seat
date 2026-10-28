@@ -1,5 +1,5 @@
 import { generatedScenarioSchema, type GeneratedScenario } from "@hot-seat/shared";
-import type { Llm } from "../providers/llm.js";
+import { MIN_REASONING_MAX_TOKENS, type Llm } from "../providers/llm.js";
 import { fillTemplate, loadPrompt } from "../prompts.js";
 
 export type ScenarioGenerator = (description: string, language: string) => Promise<GeneratedScenario>;
@@ -29,6 +29,8 @@ export class CrisisDirector {
     return this.llm.generateStructured({
       prompt: description,
       system,
+      // Large structured JSON plus reasoning: well above the minimum.
+      maxTokens: Math.max(8000, MIN_REASONING_MAX_TOKENS),
       ...(this.model ? { model: this.model } : {}),
       ...(this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : {}),
       parse: (raw) => generatedScenarioSchema.parse(raw),
