@@ -13,7 +13,8 @@
     "smoke:latency": "node --import tsx scripts/smoke-latency.ts",
     "smoke:scenario-speed": "node --import tsx scripts/smoke-scenario-speed.ts",
     "smoke:browserlike": "node --import tsx scripts/smoke-browserlike.ts",
-    "smoke:debrief": "node --import tsx scripts/smoke-debrief.ts"
+    "smoke:debrief": "node --import tsx scripts/smoke-debrief.ts",
+    "sim": "node --import tsx scripts/sim/main.ts"
   },
   "dependencies": {
     "@hot-seat/shared": "*",
