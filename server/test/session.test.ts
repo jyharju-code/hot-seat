@@ -354,21 +354,76 @@ describe("SessionOrchestrator (fake adapters)", () => {
     await orch.stop();
   });
 
-  it("owner_done not arrived falls back to the word heuristic", async () => {
+  it("slow LLM (owner_done true) ends the turn when it arrives, not at the silence window", async () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const { stt, messages, orch } = await started({
+      turnEndSilenceMs: 100,
+      turnEndHesitantMs: 1000,
+      nextTurn: async () => {
+        await wait(250);
+        return { ...parseReporterLine(VALID), owner_done: true };
+      },
+    });
+    const complete = "We closed the cafe that morning and told every customer directly today.";
+    stt.sessions[0]!.emit({ type: "final", text: complete });
+    await wait(180);
+    // 100 ms window passed but the LLM has not replied: no turn end yet.
+    expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+    await wait(250);
+    expect(messages).toContainEqual({ type: "transcript", role: "user", text: complete });
+    await orch.stop();
+  });
+
+  it("speech resuming while the LLM is pending aborts it and restarts for the longer answer", async () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const calls: string[] = [];
+    const { stt, messages, orch } = await started({
+      turnEndSilenceMs: 100,
+      turnEndHesitantMs: 1000,
+      nextTurn: async (_s: unknown, _h: unknown, answer: string) => {
+        calls.push(answer);
+        await wait(250);
+        return { ...parseReporterLine(VALID), owner_done: true };
+      },
+    });
+    const s = stt.sessions[0]!;
+    s.emit({ type: "final", text: "Yeah, yeah," });
+    await wait(150);
+    s.emit({ type: "final", text: "we refunded everyone that morning." });
+    await wait(150);
+    expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+    await wait(300);
+    expect(messages).toContainEqual({
+      type: "transcript",
+      role: "user",
+      text: "Yeah, yeah, we refunded everyone that morning.",
+    });
+    expect(calls).toEqual(["Yeah, yeah,", "Yeah, yeah, we refunded everyone that morning."]);
+    await orch.stop();
+  });
+
+  it("LLM error falls back to the word heuristic", async () => {
     const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const { stt, messages, orch } = await started({
       turnEndSilenceMs: 100,
       turnEndHesitantMs: 800,
       nextTurn: async () => {
-        await wait(300);
-        return { ...parseReporterLine(VALID), owner_done: false };
+        await wait(30);
+        throw new Error("LLM down");
       },
     });
     const complete = "We closed the cafe that morning and told every customer directly today.";
     stt.sessions[0]!.emit({ type: "final", text: complete });
-    await wait(200);
-    // Turn ended at the heuristic window even though the LLM had not replied.
-    expect(messages).toContainEqual({ type: "transcript", role: "user", text: complete });
+    await wait(50);
+    // Error arrived but the heuristic window has not passed yet.
+    expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+    await wait(250);
+    // handleFinal retries the (failing) brain, so the turn surfaces as an error, not a hang to 800 ms.
+    // The key assertion: it did not wait the hesitant cap before acting. Use transcript or error.
+    const acted =
+      messages.some((m) => m.type === "transcript" && m.role === "user") ||
+      messages.some((m) => m.type === "error");
+    expect(acted).toBe(true);
     await orch.stop();
   });
 

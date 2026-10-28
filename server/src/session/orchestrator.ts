@@ -4,7 +4,7 @@ import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
-import { TURN_END_HESITANT_MS, TURN_END_SILENCE_MS, turnEndSilenceMs } from "./turn-end.js";
+import { TURN_END_HESITANT_MS, TURN_END_SILENCE_MS, turnEndSilenceMs, type SpeculativeState } from "./turn-end.js";
 import { SpeculativeTtsBuffer } from "./speculative-tts.js";
 import {
   KEEPALIVE_DEFICIT_MS,
@@ -109,6 +109,7 @@ export class SessionOrchestrator {
     promise: Promise<ReporterLine>;
     ownerDone: boolean | null;
     settled: boolean;
+    failed: boolean;
     ttsBuffer: SpeculativeTtsBuffer | null;
   } | null = null;
   private awaitingPlayback = false;
@@ -450,7 +451,14 @@ export class SessionOrchestrator {
           let resolved: IteratorResult<SttEvent> | null = null;
           while (!this.stopped && !turnEnded) {
             const spec = this.speculative?.answer === answerSoFar ? this.speculative : null;
-            const windowMs = turnEndSilenceMs(answerSoFar, { silenceMs, hesitantMs }, spec ? spec.ownerDone : null);
+            const specState: SpeculativeState | null = spec
+              ? spec.failed
+                ? { kind: "failed" }
+                : spec.settled
+                  ? { kind: "done", ownerDone: spec.ownerDone }
+                  : { kind: "pending" }
+              : null;
+            const windowMs = turnEndSilenceMs(answerSoFar, { silenceMs, hesitantMs }, specState);
             const remaining = windowMs - waitedMs;
             if (remaining <= 0) {
               turnEnded = true;
@@ -587,6 +595,7 @@ export class SessionOrchestrator {
       promise,
       ownerDone: null as boolean | null,
       settled: false,
+      failed: false,
       ttsBuffer: null as SpeculativeTtsBuffer | null,
     };
     this.speculative = spec;
@@ -608,6 +617,7 @@ export class SessionOrchestrator {
       },
       () => {
         spec.settled = true;
+        spec.failed = true;
       },
     );
   }

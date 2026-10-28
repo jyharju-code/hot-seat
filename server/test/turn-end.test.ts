@@ -34,6 +34,28 @@ describe("adaptive turn-end silence", () => {
     expect(turnEndSilenceMs("well, so the thing is I, let me think.", {}, null)).toBe(3200);
   });
 
+  it("pending speculative result waits for the LLM up to the hesitant cap, not the heuristic", () => {
+    const complete = "We closed the cafe that morning and told every customer directly.";
+    expect(turnEndSilenceMs(complete, {}, { kind: "pending" })).toBe(3200);
+    expect(turnEndSilenceMs("Yeah, yeah,", {}, { kind: "pending" })).toBe(3200);
+    expect(turnEndSilenceMs(complete, { silenceMs: 100, hesitantMs: 900 }, { kind: "pending" })).toBe(900);
+  });
+
+  it("arrived speculative result decides: true at normal window, false or missing judgement waits or uses heuristic", () => {
+    const complete = "We closed the cafe that morning and told every customer directly.";
+    expect(turnEndSilenceMs("Yeah, yeah,", {}, { kind: "done", ownerDone: true })).toBe(1000);
+    expect(turnEndSilenceMs(complete, {}, { kind: "done", ownerDone: false })).toBe(3200);
+    expect(turnEndSilenceMs(complete, {}, { kind: "done", ownerDone: null })).toBe(1000);
+    expect(turnEndSilenceMs("well, so the thing is I, let me think.", {}, { kind: "done", ownerDone: null })).toBe(3200);
+  });
+
+  it("failed speculative call falls back to the word heuristic", () => {
+    const complete = "We closed the cafe that morning and told every customer directly.";
+    expect(turnEndSilenceMs(complete, {}, { kind: "failed" })).toBe(1000);
+    expect(turnEndSilenceMs("Yeah, yeah,", {}, { kind: "failed" })).toBe(3200);
+    expect(turnEndSilenceMs(complete, {}, "failed")).toBe(1000);
+  });
+
   it("under 8 words is hesitant even with a full stop", () => {
     expect(isHesitantAnswer("We closed it.")).toBe(true);
     expect(isHesitantAnswer("We closed the cafe that morning and told customers.")).toBe(false);

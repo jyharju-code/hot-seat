@@ -58,20 +58,40 @@ export interface TurnEndOptions {
   hesitantMs?: number;
 }
 
+/** State of the speculative turn call for the current answer. */
+export type SpeculativeState =
+  | { kind: "pending" }
+  | { kind: "done"; ownerDone: boolean | null }
+  | { kind: "failed" };
+
+export type TurnEndSpec = boolean | null | undefined | "failed" | SpeculativeState;
+
 /**
  * Silence to wait before ending the turn for this answer so far.
- * `ownerDone` is the speculative journalist's semantic judgement:
- * true ends at the normal window, false waits the hesitant window,
- * and null/undefined (not arrived yet) falls back to the word heuristic.
+ * Brief 09d: the reporter cannot speak before the LLM result exists, so
+ * waiting for `owner_done` costs no latency. While the speculative call
+ * is pending, the only deadline is the hesitant cap (3200 ms). Once it
+ * arrives, `owner_done: true` ends at the normal window and `false`
+ * waits the cap. The word heuristic decides only when the call failed
+ * (or, for legacy boolean/null callers, when no judgement was given).
  */
 export function turnEndSilenceMs(
   answer: string,
   opts: TurnEndOptions = {},
-  ownerDone?: boolean | null,
+  spec?: TurnEndSpec,
 ): number {
   const complete = opts.silenceMs ?? TURN_END_SILENCE_MS;
   const hesitant = opts.hesitantMs ?? TURN_END_HESITANT_MS;
-  if (ownerDone === true) return complete;
-  if (ownerDone === false) return hesitant;
-  return isHesitantAnswer(answer) ? hesitant : complete;
+  const heuristic = () => (isHesitantAnswer(answer) ? hesitant : complete);
+  if (spec !== null && typeof spec === "object") {
+    if (spec.kind === "pending") return hesitant;
+    if (spec.kind === "failed") return heuristic();
+    if (spec.ownerDone === true) return complete;
+    if (spec.ownerDone === false) return hesitant;
+    return heuristic();
+  }
+  if (spec === "failed") return heuristic();
+  if (spec === true) return complete;
+  if (spec === false) return hesitant;
+  return heuristic();
 }
