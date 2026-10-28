@@ -110,6 +110,7 @@ wss.on("connection", (ws: WebSocket) => {
           }
         },
         log: (line) => app.log.info(line),
+        errorLog: (line) => app.log.error(line),
         debugLog: (line) => app.log.debug(line),
       });
       return { orchestrator, record };

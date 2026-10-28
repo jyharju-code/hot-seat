@@ -1,4 +1,4 @@
-import { stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
+import { CONNECTION_HICCUP_MESSAGE, stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
 import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
 import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
@@ -6,8 +6,10 @@ import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
 import {
   PARTIAL_STABLE_MS,
+  TURN_CAP_MS,
   TURN_END_HESITANT_MS,
   TURN_END_SILENCE_MS,
+  cappedTurnEndSilenceMs,
   transcriptWordCount,
   transcriptsMatchNormalised,
   turnEndSilenceMs,
@@ -50,6 +52,10 @@ export interface OrchestratorDeps {
   keepAliveIntervalMs?: number;
   now?: () => number;
   log?: (line: string) => void;
+  /** Error-level log for failures. Defaults to `log`. */
+  errorLog?: (line: string) => void;
+  /** Cap from last speech activity to turn end. Default 4000. */
+  turnCapMs?: number;
   /** Debug-level log (keep-alive top-ups). */
   debugLog?: (line: string) => void;
   /** When set, every turn is recorded with its timestamp and flags for the debrief. */
@@ -97,6 +103,31 @@ export const MAX_ENDED_MESSAGE = "Session ended after reaching the maximum sessi
 export const INTERRUPT_AFTER_MS = 8000;
 export const INTERRUPT_INTERVAL_MS = 1500;
 export const INTERRUPT_TTS_MODEL = "eleven_v4_turbo";
+export const RECOVERY_LINE = "Sorry, my line dropped. Let me ask that again.";
+export const STT_TERMINAL_MESSAGE = "Microphone connection lost. Please end and start again.";
+export type FailStage = "stt" | "turn_llm" | "tts" | "interrupt" | "escalation";
+
+/** Log-safe error text: strips URL query strings and key-like parameters, truncates. */
+export function sanitizeErrorForLog(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const noUrls = raw.replace(/https?:\/\/\S+/g, (m) => {
+    try {
+      const u = new URL(m.replace(/[),.;]+$/, ""));
+      return u.origin + u.pathname;
+    } catch {
+      return "[url]";
+    }
+  });
+  return noUrls.replace(/([?&](?:api[_-]?key|key|token|authorization)=)[^\s&]+/gi, "$1[redacted]").slice(0, 300);
+}
+
+function causeText(err: unknown): string {
+  if (err instanceof Error && err.cause !== undefined && err.cause !== null) {
+    const c = err.cause;
+    return sanitizeErrorForLog(c instanceof Error ? c : new Error(String(c)));
+  }
+  return "";
+}
 
 /**
  * Half-duplex voice loop: thinking -> speaking -> (playback_done) listening.
@@ -233,7 +264,14 @@ export class SessionOrchestrator {
     this.armMaxTimer();
     this.setState("thinking");
     try {
-      const line = await this.deps.brain.openingQuestion(this.deps.scenario, this.signal);
+      let line: ReporterLine;
+      try {
+        line = await this.deps.brain.openingQuestion(this.deps.scenario, this.signal);
+      } catch (err) {
+        if (this.stopped) return;
+        this.logFail("turn_llm", err);
+        line = await this.deps.brain.openingQuestion(this.deps.scenario, this.signal);
+      }
       if (this.stopped) return;
       const timing = await this.speak(line, t0, t0, t0);
       if (this.stopped) return;
@@ -247,8 +285,18 @@ export class SessionOrchestrator {
       this.deps.sink.send({ type: "timing", timing });
     } catch (err) {
       if (this.stopped) return;
-      this.fail(err);
-      return;
+      // Opening could not be spoken: show the recovery text and listen, or end clearly.
+      try {
+        const recovery: ReporterLine = { move: "follow_up", flags: [], say: RECOVERY_LINE, quote_used: null };
+        this.hiccup("tts", err);
+        await this.speak(recovery, t0, t0, t0);
+        if (this.stopped) return;
+        this.history.push({ role: "reporter", text: recovery.say });
+      } catch (err2) {
+        if (this.stopped) return;
+        this.fail("tts", err2, "Could not start the interview. Please end and start again.");
+        return;
+      }
     }
     // State stays "speaking" until the browser has really played the audio.
     this.awaitingPlayback = true;
@@ -289,9 +337,31 @@ export class SessionOrchestrator {
     if (!this.stopped) this.deps.sink.send({ type: "state", state });
   }
 
-  private fail(err: unknown): void {
-    const message = err instanceof Error ? err.message : String(err);
-    if (!this.stopped) this.deps.sink.send({ type: "error", message });
+  /** Log a failure at error level. Never sends the raw provider error to the client. */
+  private logFail(stage: FailStage, err: unknown): void {
+    const cause = causeText(err);
+    const line = `[error] stage=${stage} message=${sanitizeErrorForLog(err)}${cause ? ` cause=${cause}` : ""}`;
+    (this.deps.errorLog ?? this.log)(line);
+  }
+
+  /** Terminal failure: log, show a clear message, end the session (End highlighted client-side). */
+  private fail(stage: FailStage, err: unknown, clientMessage = STT_TERMINAL_MESSAGE): void {
+    this.logFail(stage, err);
+    if (this.stopped) return;
+    try {
+      this.deps.sink.send({ type: "error", message: clientMessage });
+    } catch { /* client gone */ }
+    this.endSession(clientMessage);
+  }
+
+  /** Recoverable failure: log and show the gentle hiccup notice, never the raw error. */
+  private hiccup(stage: FailStage, err: unknown): void {
+    this.logFail(stage, err);
+    if (!this.stopped) {
+      try {
+        this.deps.sink.send({ type: "error", message: CONNECTION_HICCUP_MESSAGE });
+      } catch { /* client gone */ }
+    }
   }
 
   private startKeepAlive(): void {
@@ -346,7 +416,7 @@ export class SessionOrchestrator {
         this.lastSttError = err instanceof Error ? err.message : String(err);
         this.log(`[stt] open failed (${this.sttFailures}/${STT_MAX_CONSECUTIVE_OPEN_FAILURES}): ${this.lastSttError}`);
         if (this.sttFailures >= STT_MAX_CONSECUTIVE_OPEN_FAILURES) {
-          this.fail(err);
+          this.fail("stt", err);
           return null;
         }
         await this.sleep(this.backoffDelay(this.sttFailures));
@@ -373,7 +443,7 @@ export class SessionOrchestrator {
     this.armIdleTimer();
     this.startKeepAlive();
     this.sttLoop = this.consumeStt();
-    void this.sttLoop.catch((err: unknown) => this.fail(err));
+    void this.sttLoop.catch((err: unknown) => this.fail("stt", err));
   }
 
   private async consumeStt(): Promise<void> {
@@ -382,6 +452,10 @@ export class SessionOrchestrator {
     const parts: string[] = [];
     let lastFinalAt: number | null = null;
     let lastEndpointAt: number | null = null;
+    // Last speech activity of any kind. The timing origin: an endpoint can be
+    // the first pause of a resumed answer, while later partials prove speech
+    // continued, so the origin must move with every speech event.
+    let lastSpeechAt: number | null = null;
     // Interrupt decision state for this one answer. All of this state lives
     // outside the per-session loop below, so an STT reopen inside one answer
     // keeps the answer start time and the interrupt bookkeeping.
@@ -510,7 +584,10 @@ export class SessionOrchestrator {
                   : { kind: "pending" }
               : null;
             const windowMs = turnEndSilenceMs(answerSoFar, { silenceMs, hesitantMs }, specState);
-            const remaining = windowMs - waitedMs;
+            // Cap: end the turn by turnCapMs after the last speech, accepting
+            // whatever speculative result exists then (brief 11).
+            const sinceSpeechMs = lastSpeechAt === null ? 0 : this.now() - lastSpeechAt;
+            const remaining = cappedTurnEndSilenceMs(Math.max(0, windowMs - waitedMs), sinceSpeechMs, this.deps.turnCapMs ?? TURN_CAP_MS);
             if (remaining <= 0) {
               turnEnded = true;
               break;
@@ -550,6 +627,7 @@ export class SessionOrchestrator {
         if (ev.type === "endpoint") {
           this.noteSpeech();
           lastEndpointAt = this.now();
+          lastSpeechAt = lastEndpointAt;
           this.speechEndAt = lastEndpointAt;
         } else if (ev.type === "error") {
           this.lastSttError = ev.message;
@@ -560,6 +638,7 @@ export class SessionOrchestrator {
           const text = ev.text.trim();
           if (text) {
             if (answerStartedAt === null) answerStartedAt = this.now();
+            lastSpeechAt = this.now();
             pendingPartial = text;
             // Prefix with collected finals / sealed segments, so a partial
             // from a reopened session continues the full answer text.
@@ -587,6 +666,7 @@ export class SessionOrchestrator {
           pendingPartial = "";
           latestPartial = parts.join(" ");
           lastFinalAt = this.now();
+          lastSpeechAt = lastFinalAt;
           partialCandidate = latestPartial;
           partialCandidateSince = null;
           maybeDecide(latestPartial);
@@ -614,7 +694,7 @@ export class SessionOrchestrator {
         this.log(`[stt] session ended while listening; reopening (kept ${parts.length} answer segment(s))`);
         this.teardownStt();
         if (this.sttFailures >= STT_MAX_CONSECUTIVE_OPEN_FAILURES) {
-          this.fail(new Error(this.lastSttError));
+          this.fail("stt", new Error(this.lastSttError));
           return;
         }
         await this.sleep(this.backoffDelay(this.sttFailures));
@@ -631,7 +711,9 @@ export class SessionOrchestrator {
     }
     if (parts.length === 0) return;
     const finalAt = lastFinalAt ?? this.now();
-    const speechEndAt = lastEndpointAt ?? finalAt;
+    // Origin is the last speech activity, not the first endpoint: resumed
+    // speech after an endpoint moves it (see lastSpeechAt above).
+    const speechEndAt = Math.max(lastSpeechAt ?? 0, lastEndpointAt ?? 0, 0) || finalAt;
     await this.handleFinal(parts.join(" "), speechEndAt, finalAt);
   }
 
@@ -717,16 +799,60 @@ export class SessionOrchestrator {
     return due.esc;
   }
 
+  /** Stream TTS, retrying once with a fresh request only if no audio was sent yet. */
+  private async streamTts(text: string, options: { voiceId?: string; model?: string }, onChunk: (chunk: Uint8Array) => void): Promise<void> {
+    let sent = 0;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        for await (const chunk of this.deps.tts.synthesize(text, { ...options, signal: this.signal })) {
+          if (this.stopped) return;
+          sent += 1;
+          onChunk(chunk);
+        }
+        return;
+      } catch (err) {
+        if (this.stopped) return;
+        lastErr = err;
+        if (sent > 0 || attempt === 1) throw err;
+        this.log(`[tts] stream failed before audio, retrying once: ${sanitizeErrorForLog(err)}`);
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * Recover a failed turn instead of hanging: speak the recovery line, or, if
+   * TTS itself is down, leave its text on screen and go back to listening.
+   * Always leaves the state machine in speaking (awaiting playback) or listening.
+   */
+  private async recoverTurn(stage: FailStage, err: unknown): Promise<void> {
+    this.hiccup(stage, err);
+    if (this.stopped) return;
+    const recovery: ReporterLine = { move: "follow_up", flags: [], say: RECOVERY_LINE, quote_used: null };
+    this.history.push({ role: "reporter", text: recovery.say });
+    this.deps.record?.turns.push({ role: "reporter", text: stripAudioTags(recovery.say), elapsedSeconds: this.elapsedSeconds(), flags: [] });
+    const now = this.now();
+    try {
+      await this.speak(recovery, now, now, now);
+      if (this.stopped) return;
+      this.awaitingPlayback = true;
+    } catch (err2) {
+      if (this.stopped) return;
+      this.logFail("tts", err2);
+      // Recovery text was already shown by speak(); go straight to listening.
+      await this.beginListening();
+    }
+  }
+
   /** Stream the news flash in the radio voice. No audio_end: the reporter follows. */
   private async speakNews(text: string): Promise<void> {
     this.setState("speaking");
-    for await (const chunk of this.deps.tts.synthesize(text, {
-      voiceId: this.deps.newsVoiceId ?? NEWS_VOICE_ID,
-      model: this.deps.newsTtsModel ?? NEWS_TTS_MODEL,
-      signal: this.signal,
-    })) {
-      if (this.stopped) break;
-      this.deps.sink.sendAudio(chunk);
+    try {
+      await this.streamTts(text, { voiceId: this.deps.newsVoiceId ?? NEWS_VOICE_ID, model: this.deps.newsTtsModel ?? NEWS_TTS_MODEL }, (chunk) => this.deps.sink.sendAudio(chunk));
+    } catch (err) {
+      if (this.stopped) return;
+      this.hiccup("escalation", err);
     }
   }
 
@@ -759,8 +885,7 @@ export class SessionOrchestrator {
     this.setState("speaking");
     let firstAudioAt: number | null = null;
     try {
-      for await (const chunk of this.deps.tts.synthesize(req.say, { voiceId: this.deps.voiceId, model: INTERRUPT_TTS_MODEL, signal: this.signal })) {
-        if (this.stopped) break;
+      await this.streamTts(req.say, { voiceId: this.deps.voiceId, model: INTERRUPT_TTS_MODEL }, (chunk) => {
         if (firstAudioAt === null) {
           firstAudioAt = this.now();
           this.log(
@@ -768,10 +893,10 @@ export class SessionOrchestrator {
           );
         }
         this.deps.sink.sendAudio(chunk);
-      }
+      });
     } catch (err) {
       if (this.stopped) return;
-      this.fail(err);
+      this.hiccup("interrupt", err);
       await this.beginListening();
       return;
     }
@@ -862,9 +987,28 @@ export class SessionOrchestrator {
       if (this.stopped) return;
     } catch (err) {
       if (this.stopped) return;
-      this.fail(err);
-      await this.beginListening();
-      return;
+      // One fresh turn-LLM retry, if this turn is still current.
+      this.logFail("turn_llm", err);
+      const turnAtStart = this.turnIndex;
+      try {
+        this.abortSpeculative();
+        line = await this.deps.brain.nextTurn(
+          this.deps.scenario,
+          [...this.history],
+          userText,
+          this.elapsedSeconds(),
+          this.signal,
+          [...this.learnedEscalations],
+        );
+        raceWinner = this.deps.brain.lastRaceWinner ?? null;
+        speculativeBuffer = null;
+        partialStartUsed = false;
+        if (this.stopped || this.turnIndex !== turnAtStart) return;
+      } catch (err2) {
+        if (this.stopped) return;
+        await this.recoverTurn("turn_llm", err2);
+        return;
+      }
     }
     const llmAt = this.now();
     userTurn.flags = [...line.flags];
@@ -880,8 +1024,7 @@ export class SessionOrchestrator {
       timing = await this.speak(line, speechEndAt, finalAt, llmAt, speculativeBuffer, partialStartUsed, raceWinner);
     } catch (err) {
       if (this.stopped) return;
-      this.fail(err);
-      await this.beginListening();
+      await this.recoverTurn("tts", err);
       return;
     }
     if (this.stopped) return;
@@ -914,12 +1057,22 @@ export class SessionOrchestrator {
       this.deps.sink.sendAudio(chunk);
     };
     if (speculativeBuffer) {
-      await speculativeBuffer.drain(onChunk, () => this.stopped);
-    } else {
-      for await (const chunk of this.deps.tts.synthesize(line.say, { voiceId: this.deps.voiceId, signal: this.signal })) {
-        if (this.stopped) break;
-        onChunk(chunk);
+      let drained = false;
+      try {
+        await speculativeBuffer.drain(onChunk, () => this.stopped);
+        drained = true;
+      } catch (err) {
+        if (firstAudioAt !== null) throw err;
+        // Buffered stream failed before any audio: fall back to a fresh stream.
+        speculativeBuffer.discard();
+        this.log(`[tts] speculative buffer failed before audio, fresh stream: ${sanitizeErrorForLog(err)}`);
       }
+      if (!drained && !this.stopped) {
+        await this.streamTts(line.say, { voiceId: this.deps.voiceId }, onChunk);
+        speculativeBuffer = null;
+      }
+    } else {
+      await this.streamTts(line.say, { voiceId: this.deps.voiceId }, onChunk);
     }
     const first = firstAudioAt ?? this.now();
     this.deps.sink.send({ type: "audio_end" });

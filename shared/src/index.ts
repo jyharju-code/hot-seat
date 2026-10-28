@@ -77,6 +77,9 @@ export const reporterLineSchema = z.object({
 });
 export type ReporterLine = z.infer<typeof reporterLineSchema>;
 
+/** Gentle client notice for a recovered connection failure (not a raw provider error). */
+export const CONNECTION_HICCUP_MESSAGE = "Connection hiccup, carrying on.";
+
 export const sessionStateSchema = z.enum(["listening", "thinking", "speaking"]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
 

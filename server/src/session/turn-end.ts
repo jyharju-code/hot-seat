@@ -6,6 +6,14 @@ export const TURN_END_SILENCE_MS = 1000;
 export const TURN_END_HESITANT_MS = 3200;
 /** A partial unchanged for this long starts the speculative turn call. */
 export const PARTIAL_STABLE_MS = 450;
+/** Hard cap from the last speech activity to ending the turn (brief 11). */
+export const TURN_CAP_MS = 4000;
+
+/** Silence window capped so the turn ends by `capMs` after the last speech. */
+export function cappedTurnEndSilenceMs(windowMs: number, sinceLastSpeechMs: number, capMs: number = TURN_CAP_MS): number {
+  const remaining = capMs - Math.max(0, sinceLastSpeechMs);
+  return Math.max(0, Math.min(windowMs, remaining));
+}
 
 /** Lowercase, punctuation removed, whitespace collapsed. */
 export function normaliseTranscript(text: string): string {

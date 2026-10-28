@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   PARTIAL_STABLE_MS,
+  TURN_CAP_MS,
   TURN_END_HESITANT_MS,
   TURN_END_SILENCE_MS,
+  cappedTurnEndSilenceMs,
   isHesitantAnswer,
   normaliseTranscript,
   transcriptWordCount,
@@ -116,6 +118,15 @@ describe("adaptive turn-end silence", () => {
     expect(transcriptsMatchNormalised("We closed the cafe today.", "We refunded everyone.")).toBe(false);
     expect(transcriptWordCount("one two three")).toBe(3);
     expect(transcriptWordCount("  ")).toBe(0);
+  });
+
+  it("cap: window is cut at TURN_CAP_MS after the last speech (brief 11)", () => {
+    expect(TURN_CAP_MS).toBe(4000);
+    expect(cappedTurnEndSilenceMs(3200, 0)).toBe(3200);
+    expect(cappedTurnEndSilenceMs(3200, 3900)).toBe(100);
+    expect(cappedTurnEndSilenceMs(3200, 4000)).toBe(0);
+    expect(cappedTurnEndSilenceMs(3200, 9000)).toBe(0);
+    expect(cappedTurnEndSilenceMs(1000, 100, 500)).toBe(400);
   });
 
   it("empty text is not hesitant", () => {
