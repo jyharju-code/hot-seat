@@ -95,6 +95,8 @@ const freshState = (): LiveState => ({
 export class SimSession {
   private readonly state = freshState();
   private ws: WebSocket | null = null;
+  private ownerSpeaking = false;
+  private micStopped = false;
 
   constructor(private readonly opts: SimSessionOptions) {}
 
@@ -124,6 +126,7 @@ export class SimSession {
     try {
       const scenario = await this.createScenario();
       await this.connect(scenario.id);
+      this.startMicLoop();
       result.session_id = this.state.sessionId;
       let previousReporter = "";
       for (let turn = 0; turn < this.opts.turns; turn++) {
@@ -141,6 +144,7 @@ export class SimSession {
       result.failure = err instanceof Error ? err.message : String(err);
       this.sendStop();
     } finally {
+      this.micStopped = true;
       result.errors = this.state.errorCount;
       try {
         this.ws?.close();
@@ -204,6 +208,29 @@ export class SimSession {
     await this.waitFor(() => this.state.sessionId !== null, "session_started", 30_000);
   }
 
+  /** Like a real mic: silence frames at real-time pace whenever the server
+   *  is listening and the owner is not speaking, including while the owner
+   *  agent writes and voices its answer. */
+  private startMicLoop(): void {
+    const silence = new Uint8Array(FRAME_BYTES);
+    void (async () => {
+      let nextAt = performance.now();
+      while (!this.micStopped) {
+        if (this.state.lastState === "listening" && !this.ownerSpeaking && this.ws?.readyState === WebSocket.OPEN) {
+          try {
+            this.ws.send(silence);
+          } catch {
+            /* socket gone */
+          }
+        }
+        nextAt += 100;
+        const wait = nextAt - performance.now();
+        if (wait > 0) await sleep(wait);
+        else nextAt = performance.now();
+      }
+    })();
+  }
+
   /** Wait out one reporter line (real playback), answer it, measure the reply. */
   private async playTurn(turn: number, scenario: GeneratedScenario, previousReporter: string): Promise<TurnMetric> {
     const errorsAtStart = this.state.errorCount;
@@ -213,24 +240,34 @@ export class SimSession {
     const line = this.state.reporterQueue.consume()!;
     const playbackMs = linePlaybackMs(line);
     const reporterText = line.text;
+    // 2) Generate the owner's answer during playback, before playback_done,
+    // so listening is not left silent while the agent writes and voices it.
+    // The mic loop streams silence from the moment listening starts until
+    // the answer is ready and speaking begins.
+    const answerPromise = (async () => {
+      const segments = await this.opts.owner.nextAnswer({
+        profile: this.opts.profileText,
+        briefing: scenario.briefing_for_user,
+        conversation: [...this.state.transcript],
+        reporterLine: reporterText,
+      });
+      this.opts.chargeChars(estimateTtsChars(segments));
+      const voiced = await synthesizeAnswer(this.opts.tts, segments, this.opts.voiceId);
+      return { segments, voiced };
+    })();
+    void answerPromise.catch(() => undefined);
     await sleep(playbackMs);
     this.ws?.send(JSON.stringify({ type: "playback_done" }));
     await this.waitFor(() => this.state.lastState === "listening", "listening state");
-
-    // 2) The owner agent writes the answer; the voice renders it.
-    const segments = await this.opts.owner.nextAnswer({
-      profile: this.opts.profileText,
-      briefing: scenario.briefing_for_user,
-      conversation: this.state.transcript,
-      reporterLine: reporterText,
-    });
-    this.opts.chargeChars(estimateTtsChars(segments));
-    const voiced = await synthesizeAnswer(this.opts.tts, segments, this.opts.voiceId);
+    const { segments, voiced } = await answerPromise;
     const spokenText = segments.map((s) => s.text).join(" ");
     this.log(`turn ${turn + 1}: speaking ${(pcmDurationMs(voiced.pcm.length) / 1000).toFixed(1)}s: ${spokenText.slice(0, 90)}`);
 
     // 3) Stream mic frames at real time by absolute clock, 100 ms frames.
     this.state.interrupted = false;
+    this.state.firstAudioAt = null;
+    this.state.awaitingFirstAudio = true;
+    this.ownerSpeaking = true;
     const transcriptsBefore = this.state.userTranscripts.length;
     const speechMs = pcmDurationMs(voiced.speechBytes);
     const t0 = performance.now();
@@ -250,23 +287,10 @@ export class SimSession {
       await pace();
     }
     const speechEndAt = t0 + speechMs;
-    if (!stoppedForInterrupt) {
-      // Trailing silence so endpointing can close the turn.
-      const silence = new Uint8Array(FRAME_BYTES);
-      this.state.firstAudioAt = null;
-      this.state.awaitingFirstAudio = true;
-      for (let i = 0; i < 20; i++) {
-        if (this.state.interrupted) {
-          stoppedForInterrupt = true;
-          break;
-        }
-        this.ws?.send(silence);
-        await pace();
-      }
-    } else {
-      this.state.firstAudioAt = null;
-      this.state.awaitingFirstAudio = true;
-    }
+    // Speaking is over: the mic loop resumes silence frames at once, which
+    // is the trailing silence endpointing needs to close the turn.
+    this.ownerSpeaking = false;
+    if (this.state.interrupted) stoppedForInterrupt = true;
 
     // 4) Wait for the reporter's reply line (the cut-in, when interrupted).
     // It stays queued: the next turn consumes it. A reply that already
