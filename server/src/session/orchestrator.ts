@@ -1,4 +1,4 @@
-import { stripAudioTags, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
+import { stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
 import type { JournalistBrain, ConversationTurn, BrainScenario } from "../journalist.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
@@ -26,7 +26,14 @@ export interface OrchestratorDeps {
   log?: (line: string) => void;
   /** When set, every turn is recorded with its timestamp and flags for the debrief. */
   record?: SessionRecord;
+  /** Multiplier for escalation at_seconds (smoke only, outside production). Default 1. */
+  escalationScale?: number;
+  newsVoiceId?: string;
+  newsTtsModel?: string;
 }
+
+export const NEWS_VOICE_ID = "3WqHLnw80rOZqJzW9YRB";
+export const NEWS_TTS_MODEL = "eleven_v4_turbo";
 
 export const DEFAULT_TURN_END_SILENCE_MS = 1500;
 export const STT_KEEPALIVE_IDLE_MS = 300;
@@ -57,6 +64,8 @@ export class SessionOrchestrator {
   private awaitingPlayback = false;
   private lastAudioAt = 0;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly firedEscalations = new Set<number>();
+  private readonly learnedEscalations: Escalation[] = [];
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -292,7 +301,14 @@ export class SessionOrchestrator {
     const controller = new AbortController();
     const history: ConversationTurn[] = [...this.history, { role: "user", text: answer }];
     const promise = Promise.resolve().then(() =>
-      this.deps.brain.nextTurn(this.deps.scenario, history, answer, this.elapsedSeconds(), controller.signal),
+      this.deps.brain.nextTurn(
+        this.deps.scenario,
+        history,
+        answer,
+        this.elapsedSeconds(),
+        controller.signal,
+        [...this.learnedEscalations],
+      ),
     );
     promise.catch(() => undefined);
     this.speculative = { answer, controller, promise };
@@ -301,6 +317,34 @@ export class SessionOrchestrator {
   private abortSpeculative(): void {
     this.speculative?.controller.abort();
     this.speculative = null;
+  }
+
+  /** Earliest unfired escalation whose (scaled) time has passed, if any. */
+  private takeDueEscalation(): Escalation | null {
+    const scenario = this.deps.scenario;
+    if (!("escalations" in scenario)) return null;
+    const scale = this.deps.escalationScale ?? 1;
+    const elapsed = this.elapsedSeconds();
+    const due = scenario.escalations
+      .map((esc, index) => ({ esc, index }))
+      .filter(({ esc, index }) => !this.firedEscalations.has(index) && esc.at_seconds * scale <= elapsed)
+      .sort((a, b) => a.esc.at_seconds - b.esc.at_seconds || a.index - b.index)[0];
+    if (!due) return null;
+    this.firedEscalations.add(due.index);
+    this.learnedEscalations.push(due.esc);
+    return due.esc;
+  }
+
+  /** Stream the news flash in the radio voice. No audio_end: the reporter follows. */
+  private async speakNews(text: string): Promise<void> {
+    this.setState("speaking");
+    for await (const chunk of this.deps.tts.synthesize(text, {
+      voiceId: this.deps.newsVoiceId ?? NEWS_VOICE_ID,
+      model: this.deps.newsTtsModel ?? NEWS_TTS_MODEL,
+    })) {
+      if (this.stopped) break;
+      this.deps.sink.sendAudio(chunk);
+    }
   }
 
   private async handleFinal(text: string, speechEndAt: number, finalAt: number): Promise<void> {
@@ -317,16 +361,53 @@ export class SessionOrchestrator {
     };
     this.deps.record?.turns.push(userTurn);
     this.setState("thinking");
+    // Turn boundary: at most one escalation fires here, before the reply.
+    const escalation = this.takeDueEscalation();
     let line: ReporterLine;
     try {
-      // Never speak a reply generated from a shorter answer than the final one.
-      if (this.speculative && this.speculative.answer === userText) {
+      if (escalation) {
+        // The speculative reply was generated without the new fact.
+        this.abortSpeculative();
+        this.history.push({ role: "news", text: escalation.news_flash });
+        this.deps.record?.turns.push({
+          role: "news",
+          text: escalation.news_flash,
+          elapsedSeconds: this.elapsedSeconds(),
+          flags: [],
+        });
+        const linePromise = Promise.resolve().then(() =>
+          this.deps.brain.nextTurn(
+            this.deps.scenario,
+            [...this.history],
+            userText,
+            this.elapsedSeconds(),
+            undefined,
+            [...this.learnedEscalations],
+          ),
+        );
+        linePromise.catch(() => undefined);
+        this.deps.sink.send({
+          type: "news_flash",
+          text: escalation.news_flash,
+          atSeconds: this.elapsedSeconds(),
+        });
+        await this.speakNews(escalation.news_flash);
+        line = await linePromise;
+      } else if (this.speculative && this.speculative.answer === userText) {
+        // Never speak a reply generated from a shorter answer than the final one.
         const pending = this.speculative.promise;
         this.speculative = null;
         line = await pending;
       } else {
         this.abortSpeculative();
-        line = await this.deps.brain.nextTurn(this.deps.scenario, [...this.history], userText, this.elapsedSeconds());
+        line = await this.deps.brain.nextTurn(
+          this.deps.scenario,
+          [...this.history],
+          userText,
+          this.elapsedSeconds(),
+          undefined,
+          [...this.learnedEscalations],
+        );
       }
     } catch (err) {
       this.fail(err);

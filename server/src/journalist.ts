@@ -1,4 +1,4 @@
-import { reporterLineSchema, revealedLandmines, type GeneratedScenario, type ReporterLine } from "@hot-seat/shared";
+import { reporterLineSchema, revealedLandmines, type Escalation, type GeneratedScenario, type ReporterLine } from "@hot-seat/shared";
 import type { Llm } from "./providers/llm.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
 import type { DemoScenario } from "./scenarios/cafe.js";
@@ -19,7 +19,7 @@ export async function loadJournalistPrompts(): Promise<JournalistPrompts> {
 }
 
 export interface ConversationTurn {
-  role: "user" | "reporter";
+  role: "user" | "reporter" | "news";
   text: string;
 }
 
@@ -71,10 +71,19 @@ function persona(scenario: BrainScenario): Persona {
   };
 }
 
-function landminesText(scenario: BrainScenario, journalistId: string, elapsedSeconds: number): string {
+function landminesText(
+  scenario: BrainScenario,
+  journalistId: string,
+  elapsedSeconds: number,
+  learnedEscalations: readonly Escalation[] = [],
+): string {
   if (!isGenerated(scenario)) return "None yet.";
-  const known = revealedLandmines(scenario, journalistId, elapsedSeconds);
-  return known.length > 0 ? known.map((m) => m.fact).join("; ") : "None yet.";
+  const known = revealedLandmines(scenario, journalistId, elapsedSeconds).map((m) => m.fact);
+  const fromEscalations = learnedEscalations
+    .filter((e) => e.gives_journalist === journalistId)
+    .map((e) => e.new_fact);
+  const all = [...known, ...fromEscalations];
+  return all.length > 0 ? all.join("; ") : "None yet.";
 }
 
 /** One reporter brain: Muse Spark chat with zod-validated JSON, one retry. */
@@ -108,14 +117,15 @@ export class JournalistBrain {
     lastAnswer: string,
     elapsedSeconds = 0,
     signal?: AbortSignal,
+    learnedEscalations: readonly Escalation[] = [],
   ): Promise<ReporterLine> {
     const p = persona(scenario);
     const tail = history
       .slice(-8)
-      .map((t) => `${t.role === "user" ? "Owner" : p.name}: ${t.text}`)
+      .map((t) => `${t.role === "user" ? "Owner" : t.role === "news" ? "News" : p.name}: ${t.text}`)
       .join("\n");
     const prompt = fillTemplate(this.prompts.journalistTurn, {
-      ...this.vars(scenario, elapsedSeconds),
+      ...this.vars(scenario, elapsedSeconds, learnedEscalations),
       transcript_tail: tail || "(nothing yet)",
       last_answer: lastAnswer,
       spoken_style: this.prompts.spokenStyle,
@@ -123,7 +133,11 @@ export class JournalistBrain {
     return this.ask(prompt, signal);
   }
 
-  private vars(scenario: BrainScenario, elapsedSeconds: number): Record<string, string> {
+  private vars(
+    scenario: BrainScenario,
+    elapsedSeconds: number,
+    learnedEscalations: readonly Escalation[] = [],
+  ): Record<string, string> {
     const p = persona(scenario);
     return {
       name: p.name,
@@ -131,7 +145,7 @@ export class JournalistBrain {
       temperament: p.temperament,
       agenda: p.agenda,
       public_facts: p.publicFacts.join("; "),
-      landmines_known_to_you: landminesText(scenario, p.journalistId, elapsedSeconds),
+      landmines_known_to_you: landminesText(scenario, p.journalistId, elapsedSeconds, learnedEscalations),
     };
   }
 

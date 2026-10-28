@@ -1,7 +1,7 @@
 import { formatMmSs, type GeneratedScenario, type ReporterFlag } from "@hot-seat/shared";
 
 export interface TimedTurn {
-  role: "user" | "reporter";
+  role: "user" | "reporter" | "news";
   text: string;
   /** Seconds from session start. */
   elapsedSeconds: number;
@@ -43,14 +43,20 @@ export const sessionStore = new SessionStore();
 export function formatTranscript(turns: readonly TimedTurn[]): string {
   if (turns.length === 0) return "(no transcript)";
   return turns
-    .map((t) => `[${formatMmSs(t.elapsedSeconds)}] ${t.role === "reporter" ? "Reporter" : "Owner"}: ${t.text}`)
+    .map(
+      (t) =>
+        `[${formatMmSs(t.elapsedSeconds)}] ${t.role === "reporter" ? "Reporter" : t.role === "news" ? "News" : "Owner"}: ${t.text}`,
+    )
     .join("\n");
 }
 
-/** One line per flagged user turn, for the {events} prompt slot. */
+/** News flashes and one line per flagged user turn, for the {events} prompt slot. */
 export function formatEvents(turns: readonly TimedTurn[]): string {
-  const lines = turns
-    .filter((t) => t.role === "user" && t.flags.length > 0)
-    .map((t) => `[${formatMmSs(t.elapsedSeconds)}] Owner flags: ${t.flags.join(", ")}`);
+  const lines = turns.flatMap((t) => {
+    if (t.role === "news") return [`[${formatMmSs(t.elapsedSeconds)}] News: ${t.text}`];
+    if (t.role === "user" && t.flags.length > 0)
+      return [`[${formatMmSs(t.elapsedSeconds)}] Owner flags: ${t.flags.join(", ")}`];
+    return [];
+  });
   return lines.length > 0 ? lines.join("\n") : "(no flags)";
 }

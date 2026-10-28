@@ -60,6 +60,7 @@ wss.on("connection", (ws: WebSocket) => {
     }
     if (msg.data.type === "start") {
       const scenarioId = msg.data.scenarioId;
+      const escalationScale = config.NODE_ENV !== "production" ? msg.data.escalationScale : undefined;
       void (async () => {
         try {
           if (!config.MODEL_API_KEY) throw new Error("MODEL_API_KEY is not configured on the server");
@@ -94,6 +95,7 @@ wss.on("connection", (ws: WebSocket) => {
             },
             scenario,
             record,
+            ...(escalationScale !== undefined ? { escalationScale } : {}),
             voiceId: voice.voiceId,
             turnEndSilenceMs: config.TURN_END_SILENCE_MS,
             log: (line) => app.log.info(line),

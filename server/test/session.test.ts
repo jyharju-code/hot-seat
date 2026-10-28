@@ -6,6 +6,7 @@ import type { SpeechToText, SttEvent, SttSession } from "../src/providers/speech
 import type { TextToSpeech } from "../src/providers/text-to-speech.js";
 import { cafeScenario, cafeTestScenario } from "../src/scenarios/cafe.js";
 import { SessionOrchestrator, type ClientSink } from "../src/session/orchestrator.js";
+import { formatEvents, type SessionRecord } from "../src/session/store.js";
 
 const VALID = JSON.stringify({
   move: "follow_up",
@@ -94,8 +95,10 @@ class FakeStt implements SpeechToText {
 
 class FakeTts implements TextToSpeech {
   texts: string[] = [];
-  async *synthesize(text: string): AsyncIterable<Uint8Array> {
+  options: Array<{ voiceId?: string; model?: string }> = [];
+  async *synthesize(text: string, options?: { voiceId?: string; model?: string }): AsyncIterable<Uint8Array> {
     this.texts.push(text);
+    this.options.push(options ?? {});
     yield new Uint8Array([1, 0, 2, 0]);
     yield new Uint8Array([3, 0]);
   }
@@ -601,5 +604,80 @@ describe("Realtime ingress (brief 05a, gap-sensitive fake STT)", () => {
     expect(stt.sessions).toHaveLength(1);
     expect(errors(messages)).toHaveLength(1);
     await orch.stop();
+  });
+});
+
+describe("Escalations (brief 06)", () => {
+  async function startedEsc(scenario = cafeTestScenario) {
+    const stt = new FakeStt();
+    const tts = new FakeTts();
+    const messages: ServerMessage[] = [];
+    const events: string[] = [];
+    const sink: ClientSink = {
+      send: (m) => { messages.push(m); events.push(m.type); },
+      sendAudio: () => { events.push("audio"); },
+    };
+    const llm = new FakeLlm([VALID]);
+    const brain = new JournalistBrain(llm, PROMPTS);
+    const record: SessionRecord = { id: "s1", scenario, startedAtMs: 0, turns: [] };
+    let nowMs = 0;
+    const orch = new SessionOrchestrator({
+      stt, brain, tts, sink, scenario, voiceId: "voice-1",
+      turnEndSilenceMs: 0, now: () => nowMs, record,
+    });
+    await orch.start();
+    await orch.playbackDone();
+    const answer = async (text: string) => {
+      const s = stt.sessions[stt.sessions.length - 1]!;
+      s.emit({ type: "endpoint" });
+      s.emit({ type: "final", text, turnId: "t" });
+      for (let i = 0; i < 12; i++) await tick();
+      await orch.playbackDone();
+      for (let i = 0; i < 4; i++) await tick();
+    };
+    return { stt, tts, messages, events, orch, llm, record, answer, setNow: (s: number) => { nowMs = s * 1000; } };
+  }
+
+  it("fires at the first turn boundary after at_seconds, not before, with news voice and order", async () => {
+    const h = await startedEsc();
+    h.setNow(119);
+    await h.answer("We acted that morning.");
+    expect(h.messages.some((m) => m.type === "news_flash")).toBe(false);
+    const mark = h.events.length;
+    h.setNow(121);
+    await h.answer("We are sorry.");
+    expect(h.messages).toContainEqual({ type: "news_flash", text: "A second post about the café is spreading", atSeconds: 121 });
+    // Journalist prompt received the new fact.
+    expect(h.llm.lastPrompt).toContain("A second customer has posted");
+    // News spoken with Daniel voice / turbo model, before reporter line.
+    const newsIdx = h.tts.texts.indexOf("A second post about the café is spreading");
+    expect(newsIdx).toBeGreaterThanOrEqual(0);
+    expect(h.tts.options[newsIdx]).toEqual({ voiceId: "3WqHLnw80rOZqJzW9YRB", model: "eleven_v4_turbo" });
+    const ordered = h.events.slice(mark).filter((e) => ["news_flash", "audio", "reporter_line", "audio_end"].includes(e));
+    expect(ordered).toEqual(["news_flash", "audio", "audio", "reporter_line", "audio", "audio", "audio_end"]);
+    // Recorded for debrief {events} with mm:ss.
+    expect(h.record.turns).toContainEqual(expect.objectContaining({ role: "news", text: "A second post about the café is spreading", elapsedSeconds: 121 }));
+    expect(formatEvents(h.record.turns)).toContain("[02:01] News: A second post about the café is spreading");
+    await h.orch.stop();
+  });
+
+  it("fires only one escalation per turn, earliest first", async () => {
+    const scenario = {
+      ...cafeTestScenario,
+      escalations: [
+        { at_seconds: 10, news_flash: "First flash", gives_journalist: "J1", new_fact: "fact one" },
+        { at_seconds: 20, news_flash: "Second flash", gives_journalist: "J1", new_fact: "fact two" },
+      ],
+    };
+    const h = await startedEsc(scenario);
+    h.setNow(100);
+    await h.answer("Answer one.");
+    expect(h.messages.filter((m) => m.type === "news_flash")).toEqual([{ type: "news_flash", text: "First flash", atSeconds: 100 }]);
+    expect(h.llm.lastPrompt).toContain("fact one");
+    expect(h.llm.lastPrompt).not.toContain("fact two");
+    await h.answer("Answer two.");
+    expect(h.messages.filter((m) => m.type === "news_flash").map((m) => (m.type === "news_flash" ? m.text : ""))).toEqual(["First flash", "Second flash"]);
+    expect(h.llm.lastPrompt).toContain("fact two");
+    await h.orch.stop();
   });
 });
