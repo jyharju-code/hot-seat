@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ReporterLine, ServerMessage } from "@hot-seat/shared";
-import { JournalistBrain, parseReporterLine, type JournalistPrompts } from "../src/journalist.js";
+import { JournalistBrain, loadJournalistPrompts, parseReporterLine, type JournalistPrompts } from "../src/journalist.js";
 import type { Llm, LlmChatResult } from "../src/providers/llm.js";
 import type { SpeechToText, SttEvent, SttSession } from "../src/providers/speech-to-text.js";
 import type { TextToSpeech } from "../src/providers/text-to-speech.js";
@@ -174,6 +174,39 @@ describe("JournalistBrain", () => {
     expect(llm.lastPrompt).toContain("turn-9");
     expect(llm.lastPrompt).not.toContain("turn-3");
     expect(logs.some((l) => l === `[turn] prompt chars=${llm.lastPrompt.length}`)).toBe(true);
+  });
+
+  it("passes the reporter's last 3 lines as your_recent_lines (brief 11)", async () => {
+    const llm = new FakeLlm([VALID]);
+    const prompts: JournalistPrompts = {
+      spokenStyle: "STYLE",
+      journalistTurn: "RECENT<<{your_recent_lines}>> {last_answer} {spoken_style} {public_facts} {landmines_known_to_you}",
+      openingQuestion: "O",
+    };
+    const brain = new JournalistBrain(llm, prompts);
+    const history = [
+      { role: "reporter" as const, text: "oldest line" },
+      { role: "user" as const, text: "answer one" },
+      { role: "reporter" as const, text: "second line" },
+      { role: "reporter" as const, text: "third line" },
+      { role: "reporter" as const, text: "fourth line" },
+    ];
+    await brain.nextTurn(cafeScenario, history, "last");
+    expect(llm.lastPrompt).toContain("second line\nthird line\nfourth line");
+    expect(llm.lastPrompt).not.toContain("oldest line");
+  });
+
+  it("real journalist prompt lists a varied repertoire and caps yes/no at once (brief 11)", async () => {
+    const prompts = await loadJournalistPrompts();
+    const llm = new FakeLlm([VALID]);
+    const brain = new JournalistBrain(llm, prompts);
+    await brain.nextTurn(cafeScenario, [{ role: "reporter", text: "Earlier question?" }], "We fixed it.");
+    expect(llm.lastPrompt).toContain("at most once");
+    expect(llm.lastPrompt).toContain("What do you say to");
+    expect(llm.lastPrompt).toContain("Is that all?");
+    expect(llm.lastPrompt).toContain("never reuse their opening words");
+    expect(llm.lastPrompt).toContain("Earlier question?");
+    expect(llm.lastPrompt).not.toContain("{your_recent_lines}");
   });
 
   it("throws after the single retry also fails", async () => {

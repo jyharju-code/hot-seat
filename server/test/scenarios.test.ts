@@ -6,6 +6,7 @@ import { cafeTestScenario } from "../src/scenarios/cafe.js";
 import { presets } from "../src/scenarios/presets.js";
 import { requireScenario, ScenarioStore } from "../src/scenarios/store.js";
 import { voiceFor, voices } from "../src/voices.js";
+import { loadPrompt } from "../src/prompts.js";
 
 describe("scenario schema", () => {
   it("accepts a valid fixture", () => {
@@ -41,6 +42,18 @@ describe("landmine reveal filter", () => {
     expect(cafeTestScenario.landmines.map((m) => m.reveal_after_seconds)).toEqual([40, 90, 150]);
     expect(cafeTestScenario.briefing_for_user.length).toBeGreaterThanOrEqual(6);
     expect(cafeTestScenario.briefing_for_user.length).toBeLessThanOrEqual(8);
+  });
+});
+
+describe("director prompt (brief 11)", () => {
+  it("derives temperament from outlet and writes owner-known landmines in second person", async () => {
+    const prompt = await loadPrompt("crisis-director.md");
+    expect(prompt).toContain("must follow from their outlet");
+    expect(prompt).toContain("not\n  default to \"relentless\"");
+    expect(prompt).toContain("local paper often leads with the human angle");
+    expect(prompt).toContain("second person");
+    expect(prompt).toContain("You got an alert");
+    expect(prompt).toContain("Never write\n  owner-known facts in the third person");
   });
 });
 

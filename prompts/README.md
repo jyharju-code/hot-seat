@@ -20,7 +20,7 @@ repository README; no code came with them.
   It is spliced into the reporter prompts as `{spoken_style}`.
 - `journalist-turn.md`: one reporter turn. Fill `{name}`, `{outlet}`,
   `{temperament}`, `{agenda}`, `{public_facts}`, `{transcript_tail}`,
-  `{last_answer}` and `{spoken_style}` at runtime.
+  `{your_recent_lines}`, `{last_answer}` and `{spoken_style}` at runtime.
 - `opening-question.md`: same persona, no `last_answer`; asks the first
   question about the scenario.
 - `interrupt-decision.md`: whether the reporter should cut in now. Fill

@@ -132,9 +132,11 @@ export class JournalistBrain {
       .slice(-6)
       .map((t) => `${t.role === "user" ? "Owner" : t.role === "news" ? "News" : p.name}: ${t.text}`)
       .join("\n");
+    const recent = history.filter((t) => t.role === "reporter").slice(-3).map((t) => t.text);
     const prompt = fillTemplate(this.prompts.journalistTurn, {
       ...this.vars(scenario, elapsedSeconds, learnedEscalations),
       transcript_tail: tail || "(nothing yet)",
+      your_recent_lines: recent.length > 0 ? recent.join("\n") : "(none yet)",
       last_answer: lastAnswer,
       spoken_style: this.prompts.spokenStyle,
     });

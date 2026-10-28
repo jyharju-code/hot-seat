@@ -27,6 +27,14 @@ Hard rules:
   example 40, 90, 150).
 - Reporters: 1 for "interview", 3 for "press_conference", with different agendas and temperaments
   (relentless, precise, human angle). In an interview the single reporter mixes all three.
+- A reporter's temperament, voice and agenda must follow from their outlet and this story, not
+  default to "relentless". A local paper often leads with the human angle, community impact and
+  named neighbours, and only gets sharp later. A trade or national outlet may be precise about
+  documents and numbers first. Pick the temperament that outlet would really send.
+- For landmines with "owner_knows": true, write "fact" in the second person, as something the
+  owner themselves lived: "You got an alert...", "You saw the crack and taped it...". Never write
+  owner-known facts in the third person ("The owner was warned..."). The surprise landmine
+  ("owner_knows": false) may be written neutrally.
 - Write in {language}. Names, places and outlets fit the setting.
 
 Return ONLY JSON matching this schema:
