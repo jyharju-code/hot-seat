@@ -54,7 +54,9 @@ export function Session({ scenarioId, onEnd }: { scenarioId: string; onEnd: () =
         wsRef.current = ws;
         locals.push(() => ws.close());
         node.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
-          if (ws.readyState === WebSocket.OPEN && stateRef.current === "listening" && !playingRef.current) ws.send(ev.data);
+          // Capture runs continuously; the server only opens STT after
+          // playback_done, so "listening" already means really listening.
+          if (ws.readyState === WebSocket.OPEN && stateRef.current === "listening") ws.send(ev.data);
         };
         ws.onopen = () => { if (!cancelled) { setLive(true); ws.send(JSON.stringify({ type: "start", scenarioId })); } };
         ws.onmessage = (ev: MessageEvent) => {
@@ -88,7 +90,13 @@ export function Session({ scenarioId, onEnd }: { scenarioId: string; onEnd: () =
     } else if (msg.type === "audio_end") {
       const wait = playerRef.current ? playerRef.current.millisecondsUntilEnd() : 0;
       window.clearTimeout(endTimerRef.current);
-      endTimerRef.current = window.setTimeout(() => { playingRef.current = false; playerRef.current?.reset(); }, wait + 50);
+      endTimerRef.current = window.setTimeout(() => {
+        playingRef.current = false;
+        playerRef.current?.reset();
+        // Reporter audio has really finished playing: server may open STT now.
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "playback_done" }));
+      }, wait + 50);
     } else if (msg.type === "timing") {
       setEntries((e) => { const c = [...e]; for (let i = c.length - 1; i >= 0; i--) { if (c[i]?.role === "reporter") { c[i] = { ...c[i]!, timing: msg.timing }; break; } } return c; });
     } else if (msg.type === "error") setError(msg.message);
