@@ -155,6 +155,15 @@ function makeApp(imageGen: ImageGen | null) {
   return { app, id };
 }
 
+async function pollFrontPage(app: ReturnType<typeof buildApp>, id: string) {
+  for (let i = 0; i < 50; i++) {
+    const res = await app.inject({ method: "GET", url: `/api/sessions/${id}/front-page` });
+    if (res.statusCode !== 202) return res;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error("front page stayed at 202");
+}
+
 describe("POST /api/sessions/:id/debrief", () => {
   it("returns debrief and front page without a camera still (generation path)", async () => {
     let generatedPrompt = "";
@@ -172,8 +181,12 @@ describe("POST /api/sessions/:id/debrief", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.debrief.verdict).toContain("dodged");
-    expect(body.frontPage.mime).toBe("image/webp");
-    expect(Buffer.from(body.frontPage.imageBase64, "base64")).toEqual(Buffer.from([1, 2, 3]));
+    // Debrief returns before the front page: image comes from its own route.
+    expect(body.frontPage).toBeNull();
+    const fp = await pollFrontPage(app, id);
+    expect(fp.statusCode).toBe(200);
+    expect(fp.json().frontPage.mime).toBe("image/webp");
+    expect(Buffer.from(fp.json().frontPage.imageBase64, "base64")).toEqual(Buffer.from([1, 2, 3]));
     expect(generatedPrompt).toContain(
       "a press photograph of the storefront of Kettle & Crumb, with reporters and microphones outside, people seen from behind",
     );
@@ -203,7 +216,9 @@ describe("POST /api/sessions/:id/debrief", () => {
       },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().frontPage).not.toBeNull();
+    expect(res.json().frontPage).toBeNull();
+    const fp = await pollFrontPage(app, id);
+    expect(fp.json().frontPage).not.toBeNull();
     expect(editMime).toBe("image/jpeg");
     await app.close();
   });
@@ -222,6 +237,36 @@ describe("POST /api/sessions/:id/debrief", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().debrief.scores.clarity).toBe(70);
     expect(res.json().frontPage).toBeNull();
+    const fp = await pollFrontPage(app, id);
+    expect(fp.statusCode).toBe(200);
+    expect(fp.json().frontPage).toBeNull();
+    await app.close();
+  });
+
+  it("front-page endpoint states: 404 unknown, 404 before debrief, 202 while printing, 200 ready", async () => {
+    let release!: (v: { image: Uint8Array; mimeType: string }) => void;
+    const gate = new Promise<{ image: Uint8Array; mimeType: string }>((r) => { release = r; });
+    const imageGen: ImageGen = {
+      generateImage: async () => gate,
+      editPhoto: async () => gate,
+    };
+    const { app, id } = makeApp(imageGen);
+    const missing = await app.inject({ method: "GET", url: "/api/sessions/nope/front-page" });
+    expect(missing.statusCode).toBe(404);
+    const before = await app.inject({ method: "GET", url: `/api/sessions/${id}/front-page` });
+    expect(before.statusCode).toBe(404);
+    // Debrief returns immediately even though the image is still gated.
+    const debriefRes = await app.inject({ method: "POST", url: `/api/sessions/${id}/debrief`, payload: {} });
+    expect(debriefRes.statusCode).toBe(200);
+    expect(debriefRes.json().debrief.verdict).toContain("dodged");
+    expect(debriefRes.json().frontPage).toBeNull();
+    const printing = await app.inject({ method: "GET", url: `/api/sessions/${id}/front-page` });
+    expect(printing.statusCode).toBe(202);
+    expect(printing.json().frontPage).toBeNull();
+    release({ image: new Uint8Array([7, 8]), mimeType: "image/webp" });
+    const ready = await pollFrontPage(app, id);
+    expect(ready.statusCode).toBe(200);
+    expect(Buffer.from(ready.json().frontPage.imageBase64, "base64")).toEqual(Buffer.from([7, 8]));
     await app.close();
   });
 

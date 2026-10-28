@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type {
   CreateScenarioResponse,
   DebriefResponse,
+  FrontPageResult,
   HealthResponse,
   ProvidersResponse,
 } from "@hot-seat/shared";
@@ -99,6 +100,66 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
         ? new MetaImageGen({ apiKey: config.MODEL_API_KEY })
         : null;
 
+  type FrontPageState =
+    | { status: "pending"; frontPage: null }
+    | { status: "ready"; frontPage: FrontPageResult }
+    | { status: "failed"; frontPage: null };
+  const frontPages = new Map<string, FrontPageState>();
+
+  const startFrontPage = (
+    sessionId: string,
+    debrief: Parameters<typeof generateFrontPage>[1],
+    scenario: Parameters<typeof generateFrontPage>[2],
+    still: { image: Uint8Array; mimeType: string } | null,
+  ): void => {
+    if (!imageGen) {
+      frontPages.set(sessionId, { status: "failed", frontPage: null });
+      app.log.info("[front-page] skipped: image generation is not configured");
+      return;
+    }
+    frontPages.set(sessionId, { status: "pending", frontPage: null });
+    const imageStarted = performance.now();
+    void (async () => {
+      try {
+        const result = await generateFrontPage(imageGen, debrief, scenario, still);
+        const imageMs = Math.round(performance.now() - imageStarted);
+        app.log.info(`[front-page] generated in ${imageMs}ms`);
+        frontPages.set(sessionId, {
+          status: "ready",
+          frontPage: {
+            imageBase64: Buffer.from(result.image).toString("base64"),
+            mime: result.mimeType,
+          },
+        });
+      } catch (err) {
+        const imageMs = Math.round(performance.now() - imageStarted);
+        app.log.error(
+          `[front-page] generation failed after ${imageMs}ms: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        frontPages.set(sessionId, { status: "failed", frontPage: null });
+      }
+    })();
+  };
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/front-page", async (request, reply) => {
+    const sessionId = request.params.id;
+    const record = sessions.get(sessionId);
+    if (!record) {
+      return reply.code(404).send({ error: "Unknown session." });
+    }
+    const entry = frontPages.get(sessionId);
+    if (!entry) {
+      if (!record.debrief) {
+        return reply.code(404).send({ error: "Front page has not started printing." });
+      }
+      return { frontPage: null };
+    }
+    if (entry.status === "pending") {
+      return reply.code(202).send({ status: "printing", frontPage: null });
+    }
+    return { frontPage: entry.frontPage };
+  });
+
   app.post<{ Params: { id: string }; Body: unknown }>(
     "/api/sessions/:id/debrief",
     { bodyLimit: MAX_STILL_BYTES * 2 },
@@ -164,30 +225,11 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
         }
       }
 
-      // Start the image as soon as the debrief JSON exists.
-      let frontPage: DebriefResponse["frontPage"] = null;
-      if (imageGen) {
-        const imageStarted = performance.now();
-        try {
-          const result = await generateFrontPage(imageGen, debrief, scenario, still);
-          const imageMs = Math.round(performance.now() - imageStarted);
-          app.log.info(`[front-page] generated in ${imageMs}ms`);
-          frontPage = {
-            imageBase64: Buffer.from(result.image).toString("base64"),
-            mime: result.mimeType,
-          };
-        } catch (err) {
-          const imageMs = Math.round(performance.now() - imageStarted);
-          app.log.error(
-            `[front-page] generation failed after ${imageMs}ms: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          frontPage = null;
-        }
-      } else {
-        app.log.info("[front-page] skipped: image generation is not configured");
-      }
+      // Start the image as soon as the debrief JSON exists, but return the
+      // debrief now: the client fetches the image from the front-page route.
+      startFrontPage(sessionId, debrief, scenario, still);
 
-      const response: DebriefResponse = { debrief, frontPage };
+      const response: DebriefResponse = { debrief, frontPage: null };
       return response;
     },
   );

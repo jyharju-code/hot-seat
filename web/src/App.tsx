@@ -22,7 +22,7 @@ type View =
   | { kind: "briefing"; built: CreateScenarioResponse }
   | { kind: "session"; built: CreateScenarioResponse; runId: number }
   | { kind: "debriefing"; built: CreateScenarioResponse; still: CameraStill | null; sessionId: string | null; startedAt: number }
-  | { kind: "debrief"; built: CreateScenarioResponse; data: DebriefResponse }
+  | { kind: "debrief"; built: CreateScenarioResponse; data: DebriefResponse; sessionId: string | null }
   | { kind: "debriefError"; built: CreateScenarioResponse; still: CameraStill | null; sessionId: string | null; message: string };
 
 export function App() {
@@ -110,7 +110,7 @@ export function App() {
         return data;
       })
       .then((data) => {
-        if (!cancelled) setView({ kind: "debrief", built: view.built, data });
+        if (!cancelled) setView({ kind: "debrief", built: view.built, data, sessionId: view.sessionId ?? view.built.id });
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -184,6 +184,7 @@ export function App() {
         <DebriefView
           debrief={view.data.debrief}
           frontPage={view.data.frontPage}
+          sessionId={view.sessionId}
           onTryAgain={() =>
             setView({ kind: "session", built: view.built, runId: Date.now() })
           }
@@ -272,15 +273,40 @@ const SCORE_LABELS: Array<{ key: keyof Debrief["scores"]; label: string }> = [
 
 function DebriefView({
   debrief,
-  frontPage,
+  frontPage: initialFrontPage,
+  sessionId,
   onTryAgain,
   onNewCrisis,
 }: {
   debrief: Debrief;
   frontPage: DebriefResponse["frontPage"];
+  sessionId: string | null;
   onTryAgain: () => void;
   onNewCrisis: () => void;
 }) {
+  const [frontPage, setFrontPage] = useState(initialFrontPage);
+  const [printing, setPrinting] = useState(!initialFrontPage && sessionId !== null);
+
+  useEffect(() => {
+    if (frontPage || !sessionId) return;
+    let cancelled = false;
+    const poll = () => {
+      fetch(`/api/sessions/${sessionId}/front-page`)
+        .then(async (res) => {
+          if (cancelled) return;
+          if (res.status === 202) return;
+          if (!res.ok) { setPrinting(false); return; }
+          const data = (await res.json()) as DebriefResponse;
+          if (cancelled) return;
+          setFrontPage(data.frontPage);
+          setPrinting(false);
+        })
+        .catch(() => { if (!cancelled) setPrinting(false); });
+    };
+    poll();
+    const id = window.setInterval(poll, 2000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [frontPage, sessionId]);
   return (
     <main>
       <h1 className="status-headline">Debrief.</h1>
@@ -349,6 +375,8 @@ function DebriefView({
             alt={`Tomorrow's front page: ${debrief.front_page.headline}`}
           />
         </figure>
+      ) : printing ? (
+        <p className="muted">Printing tomorrow&apos;s paper.</p>
       ) : (
         <p className="muted">Tomorrow&apos;s front page could not be made this time.</p>
       )}
