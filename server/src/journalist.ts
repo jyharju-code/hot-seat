@@ -1,4 +1,4 @@
-import { reporterLineSchema, type ReporterLine } from "@hot-seat/shared";
+import { reporterLineSchema, revealedLandmines, type GeneratedScenario, type ReporterLine } from "@hot-seat/shared";
 import type { Llm } from "./providers/llm.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
 import type { DemoScenario } from "./scenarios/cafe.js";
@@ -23,6 +23,60 @@ export interface ConversationTurn {
   text: string;
 }
 
+/** A scenario the brain can run: a generated one, or the legacy café fixture. */
+export type BrainScenario = GeneratedScenario | DemoScenario;
+
+export function isGenerated(scenario: BrainScenario): scenario is GeneratedScenario {
+  return "journalists" in scenario;
+}
+
+/** The single journalist for this brief. Press conferences use the first. */
+export function primaryJournalist(scenario: GeneratedScenario) {
+  const journalist = scenario.journalists[0];
+  if (!journalist) throw new Error("Scenario has no journalists");
+  return journalist;
+}
+
+interface Persona {
+  journalistId: string;
+  name: string;
+  outlet: string;
+  temperament: string;
+  agenda: string;
+  publicFacts: string[];
+  openingQuestion: string | null;
+}
+
+function persona(scenario: BrainScenario): Persona {
+  if (isGenerated(scenario)) {
+    const j = primaryJournalist(scenario);
+    return {
+      journalistId: j.id,
+      name: j.name,
+      outlet: j.outlet,
+      temperament: j.temperament,
+      agenda: j.agenda,
+      publicFacts: scenario.public_facts,
+      openingQuestion: j.opening_question,
+    };
+  }
+  return {
+    journalistId: "J1",
+    name: scenario.reporter.name,
+    outlet: scenario.reporter.outlet,
+    temperament: scenario.reporter.temperament,
+    agenda: scenario.reporter.agenda,
+    publicFacts: scenario.publicFacts,
+    openingQuestion: null,
+  };
+}
+
+function landminesText(scenario: BrainScenario, journalistId: string, elapsedSeconds: number): string {
+  if (!isGenerated(scenario)) return "None yet.";
+  const known = revealedLandmines(scenario, journalistId, elapsedSeconds);
+  return known.length > 0 ? known.map((m) => m.fact).join("; ") : "None yet.";
+}
+
 /** One reporter brain: Muse Spark chat with zod-validated JSON, one retry. */
 export class JournalistBrain {
   private readonly llm: Llm;
@@ -35,26 +89,49 @@ export class JournalistBrain {
     this.model = model;
   }
 
-  async openingQuestion(scenario: DemoScenario): Promise<ReporterLine> {
+  /** Generated scenarios carry their opening question: no extra LLM call. */
+  async openingQuestion(scenario: BrainScenario): Promise<ReporterLine> {
+    const p = persona(scenario);
+    if (p.openingQuestion) {
+      return { move: "new_angle", flags: [], say: p.openingQuestion, quote_used: null };
+    }
     const prompt = fillTemplate(this.prompts.openingQuestion, {
-      ...personaVars(scenario),
+      ...this.vars(scenario, 0),
       spoken_style: this.prompts.spokenStyle,
     });
     return this.ask(prompt);
   }
 
-  async nextTurn(scenario: DemoScenario, history: ConversationTurn[], lastAnswer: string): Promise<ReporterLine> {
+  async nextTurn(
+    scenario: BrainScenario,
+    history: ConversationTurn[],
+    lastAnswer: string,
+    elapsedSeconds = 0,
+  ): Promise<ReporterLine> {
+    const p = persona(scenario);
     const tail = history
       .slice(-8)
-      .map((t) => `${t.role === "user" ? "Owner" : scenario.reporter.name}: ${t.text}`)
+      .map((t) => `${t.role === "user" ? "Owner" : p.name}: ${t.text}`)
       .join("\n");
     const prompt = fillTemplate(this.prompts.journalistTurn, {
-      ...personaVars(scenario),
+      ...this.vars(scenario, elapsedSeconds),
       transcript_tail: tail || "(nothing yet)",
       last_answer: lastAnswer,
       spoken_style: this.prompts.spokenStyle,
     });
     return this.ask(prompt);
+  }
+
+  private vars(scenario: BrainScenario, elapsedSeconds: number): Record<string, string> {
+    const p = persona(scenario);
+    return {
+      name: p.name,
+      outlet: p.outlet,
+      temperament: p.temperament,
+      agenda: p.agenda,
+      public_facts: p.publicFacts.join("; "),
+      landmines_known_to_you: landminesText(scenario, p.journalistId, elapsedSeconds),
+    };
   }
 
   private async ask(prompt: string): Promise<ReporterLine> {
@@ -80,16 +157,6 @@ export class JournalistBrain {
       `Journalist LLM returned invalid JSON after one retry: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
     );
   }
-}
-
-function personaVars(scenario: DemoScenario): Record<string, string> {
-  return {
-    name: scenario.reporter.name,
-    outlet: scenario.reporter.outlet,
-    temperament: scenario.reporter.temperament,
-    agenda: scenario.reporter.agenda,
-    public_facts: scenario.publicFacts.join("; "),
-  };
 }
 
 /** Parse tolerantly (code fences, surrounding prose) then validate strictly with zod. */

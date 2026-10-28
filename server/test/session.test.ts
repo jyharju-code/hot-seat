@@ -4,7 +4,7 @@ import { JournalistBrain, parseReporterLine, type JournalistPrompts } from "../s
 import type { Llm, LlmChatResult } from "../src/providers/llm.js";
 import type { SpeechToText, SttEvent, SttSession } from "../src/providers/speech-to-text.js";
 import type { TextToSpeech } from "../src/providers/text-to-speech.js";
-import { cafeScenario } from "../src/scenarios/cafe.js";
+import { cafeScenario, cafeTestScenario } from "../src/scenarios/cafe.js";
 import { SessionOrchestrator, type ClientSink } from "../src/session/orchestrator.js";
 
 const VALID = JSON.stringify({
@@ -19,16 +19,22 @@ const OPENING: ReporterLine = {
   say: "[impatient] Walter, Riverside Courier. When did the display case break?",
   quote_used: null,
 };
-const PROMPTS: JournalistPrompts = { spokenStyle: "STYLE", journalistTurn: "T {last_answer} {spoken_style}", openingQuestion: "O" };
+const PROMPTS: JournalistPrompts = {
+  spokenStyle: "STYLE",
+  journalistTurn: "T {last_answer} facts:{public_facts} mines:{landmines_known_to_you} {spoken_style}",
+  openingQuestion: "O",
+};
 
 class FakeLlm implements Llm {
   calls = 0;
   lastMaxTokens = 0;
   lastReasoning: string | undefined;
+  lastPrompt = "";
   constructor(private readonly replies: string[]) {}
-  async chat(input: { maxTokens?: number; reasoningEffort?: string }): Promise<LlmChatResult> {
+  async chat(input: { maxTokens?: number; reasoningEffort?: string; messages?: Array<{ content: string }> }): Promise<LlmChatResult> {
     this.lastMaxTokens = input.maxTokens ?? 0;
     this.lastReasoning = input.reasoningEffort;
+    this.lastPrompt = input.messages?.[0]?.content ?? "";
     const text = this.replies[Math.min(this.calls, this.replies.length - 1)]!;
     this.calls += 1;
     return { text, model: "muse-spark-1.3", finishReason: "stop" };
@@ -122,6 +128,24 @@ describe("JournalistBrain", () => {
     expect(llm.calls).toBe(2);
     expect(llm.lastMaxTokens).toBeGreaterThanOrEqual(1500);
     expect(llm.lastReasoning).toBe("minimal");
+  });
+
+  it("uses the generated opening question directly, with no LLM call", async () => {
+    const llm = new FakeLlm([VALID]);
+    const brain = new JournalistBrain(llm, PROMPTS);
+    const line = await brain.openingQuestion(cafeTestScenario);
+    expect(line.say).toBe(cafeTestScenario.journalists[0]!.opening_question);
+    expect(llm.calls).toBe(0);
+  });
+
+  it("reveals landmines to the journalist only after their time has passed", async () => {
+    const llm = new FakeLlm([VALID]);
+    const brain = new JournalistBrain(llm, PROMPTS);
+    await brain.nextTurn(cafeTestScenario, [], "We fixed it.", 30);
+    expect(llm.lastPrompt).toContain("mines:None yet.");
+    await brain.nextTurn(cafeTestScenario, [], "We fixed it.", 90);
+    expect(llm.lastPrompt).toContain("display case cracked two days earlier");
+    expect(llm.lastPrompt).not.toContain("second customer messaged");
   });
 
   it("throws after the single retry also fails", async () => {

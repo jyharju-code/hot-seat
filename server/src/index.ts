@@ -8,9 +8,9 @@ loadDotenv();
 import { clientMessageSchema } from "@hot-seat/shared";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { JournalistBrain, loadJournalistPrompts } from "./journalist.js";
+import { JournalistBrain, loadJournalistPrompts, primaryJournalist } from "./journalist.js";
 import { ElevenLabsTextToSpeech, MetaLlm, MuseSpeechToText } from "./providers/index.js";
-import { cafeScenario } from "./scenarios/cafe.js";
+import { requireScenario, scenarioStore } from "./scenarios/store.js";
 import { SessionOrchestrator } from "./session/orchestrator.js";
 import { voices } from "./voices.js";
 
@@ -58,14 +58,17 @@ wss.on("connection", (ws: WebSocket) => {
       return;
     }
     if (msg.data.type === "start") {
+      const scenarioId = msg.data.scenarioId;
       void (async () => {
         try {
           if (!config.MODEL_API_KEY) throw new Error("MODEL_API_KEY is not configured on the server");
           if (!config.ELEVENLABS_API_KEY) throw new Error("ELEVENLABS_API_KEY is not configured on the server");
+          const scenario = requireScenario(scenarioStore, scenarioId);
+          const journalist = primaryJournalist(scenario);
           const prompts = await loadJournalistPrompts();
           const llm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel });
           const brain = new JournalistBrain(llm, prompts, config.llmChatModel);
-          const voice = voices[cafeScenario.reporter.voiceRole];
+          const voice = voices[journalist.temperament];
           orchestrator = new SessionOrchestrator({
             stt: new MuseSpeechToText({
               apiKey: config.MODEL_API_KEY,
@@ -79,7 +82,7 @@ wss.on("connection", (ws: WebSocket) => {
                 if (ws.readyState === ws.OPEN) ws.send(chunk, { binary: true });
               },
             },
-            scenario: cafeScenario,
+            scenario,
             voiceId: voice.voiceId,
             turnEndSilenceMs: config.TURN_END_SILENCE_MS,
             log: (line) => app.log.info(line),

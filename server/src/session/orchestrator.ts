@@ -1,8 +1,7 @@
 import { stripAudioTags, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
-import type { JournalistBrain, ConversationTurn } from "../journalist.js";
+import type { JournalistBrain, ConversationTurn, BrainScenario } from "../journalist.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
-import type { DemoScenario } from "../scenarios/cafe.js";
 
 export interface ClientSink {
   send(message: ServerMessage): void;
@@ -14,7 +13,7 @@ export interface OrchestratorDeps {
   brain: Pick<JournalistBrain, "openingQuestion" | "nextTurn">;
   tts: TextToSpeech;
   sink: ClientSink;
-  scenario: DemoScenario;
+  scenario: BrainScenario;
   voiceId: string;
   /** Silence after the last final/partial before the turn ends. Default 1500. */
   turnEndSilenceMs?: number;
@@ -39,6 +38,7 @@ export class SessionOrchestrator {
   private stopped = false;
   private speechEndAt: number | null = null;
   private sttLoop: Promise<void> | null = null;
+  private startedAt: number | null = null;
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -58,6 +58,7 @@ export class SessionOrchestrator {
   async start(): Promise<void> {
     this.stopped = false;
     const t0 = this.now();
+    this.startedAt = t0;
     this.setState("thinking");
     try {
       const line = await this.deps.brain.openingQuestion(this.deps.scenario);
@@ -172,7 +173,8 @@ export class SessionOrchestrator {
     this.setState("thinking");
     let line: ReporterLine;
     try {
-      line = await this.deps.brain.nextTurn(this.deps.scenario, [...this.history], userText);
+      const elapsedSeconds = this.startedAt === null ? 0 : Math.max(0, (this.now() - this.startedAt) / 1000);
+      line = await this.deps.brain.nextTurn(this.deps.scenario, [...this.history], userText, elapsedSeconds);
     } catch (err) {
       this.fail(err);
       await this.beginListening();

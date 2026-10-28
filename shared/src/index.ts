@@ -79,7 +79,7 @@ export const sessionStateSchema = z.enum(["listening", "thinking", "speaking"]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
 export const clientMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("start") }),
+  z.object({ type: z.literal("start"), scenarioId: z.string().min(1) }),
   z.object({ type: z.literal("stop") }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
@@ -110,6 +110,86 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
+
+// ---------------------------------------------------------------------------
+// Generated crisis scenarios (Brief 03, Crisis Director)
+// ---------------------------------------------------------------------------
+
+export const temperamentSchema = z.enum(["relentless", "precise", "human"]);
+export type Temperament = z.infer<typeof temperamentSchema>;
+
+export const landmineSchema = z.object({
+  id: z.string().min(1),
+  fact: z.string().min(1),
+  who_knows: z.string().min(1),
+  reveal_after_seconds: z.number().nonnegative(),
+});
+export type Landmine = z.infer<typeof landmineSchema>;
+
+export const journalistSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  outlet: z.string().min(1),
+  temperament: temperamentSchema,
+  agenda: z.string().min(1),
+  opening_question: z.string().min(1),
+});
+export type ScenarioJournalist = z.infer<typeof journalistSchema>;
+
+export const escalationSchema = z.object({
+  at_seconds: z.number().nonnegative(),
+  news_flash: z.string().min(1),
+  gives_journalist: z.string().min(1),
+  new_fact: z.string().min(1),
+});
+export type Escalation = z.infer<typeof escalationSchema>;
+
+export const generatedScenarioSchema = z.object({
+  format: z.enum(["interview", "press_conference"]),
+  fictionalized_from: z.string().nullable(),
+  company: z.object({
+    name: z.string().min(1),
+    industry: z.string().min(1),
+    city: z.string().min(1),
+    size: z.string().min(1),
+  }),
+  spokesperson_role: z.string().min(1),
+  crisis: z.object({
+    headline: z.string().min(1),
+    summary: z.string().min(1),
+    timeline: z.array(z.string().min(1)).min(1),
+    stakes: z.string().min(1),
+  }),
+  briefing_for_user: z.array(z.string().min(1)).min(1),
+  public_facts: z.array(z.string().min(1)).min(1),
+  landmines: z.array(landmineSchema).min(1),
+  journalists: z.array(journalistSchema).min(1),
+  escalations: z.array(escalationSchema),
+  good_answer_shape: z.string().min(1),
+});
+export type GeneratedScenario = z.infer<typeof generatedScenarioSchema>;
+
+export interface ScenarioPreset {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface CreateScenarioResponse {
+  id: string;
+  scenario: GeneratedScenario;
+}
+
+/** Landmines this journalist knows at `elapsedSeconds` into the session. */
+export function revealedLandmines(
+  scenario: GeneratedScenario,
+  journalistId: string,
+  elapsedSeconds: number,
+): Landmine[] {
+  return scenario.landmines.filter(
+    (m) => m.who_knows === journalistId && m.reveal_after_seconds <= elapsedSeconds,
+  );
+}
 
 /** Strip ElevenLabs audio tags (e.g. `[sharply]`) for display. TTS keeps the raw text. */
 export function stripAudioTags(text: string): string {
