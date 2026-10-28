@@ -80,6 +80,7 @@ export type SessionState = z.infer<typeof sessionStateSchema>;
 
 export const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("start"), scenarioId: z.string().min(1) }),
+  z.object({ type: z.literal("playback_done") }),
   z.object({ type: z.literal("stop") }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
