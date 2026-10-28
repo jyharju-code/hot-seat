@@ -34,11 +34,14 @@ export class PcmPlayer {
     this.ctx = ctx;
   }
 
-  /** Mark the start of a new reporter line. The jitter delay is armed here and
-   *  applied when the first chunk actually arrives, so TTS latency does not eat it. */
+  /** Mark the start of a new reporter line. The jitter delay is re-armed
+   *  only when nothing is still queued; otherwise the new line appends
+   *  after the audio already scheduled (news flash, then reporter). */
   beginLine(): void {
     this.aligner.reset();
-    this.nextTime = 0;
+    if (this.nextTime <= this.ctx.currentTime) {
+      this.nextTime = 0;
+    }
     this.lineStarted = true;
   }
 

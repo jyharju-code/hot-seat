@@ -94,6 +94,20 @@ describe("PcmPlayer jitter buffer", () => {
     expect(sources[0]!.startedAt).toBeCloseTo(5 + JITTER_BUFFER_MS / 1000, 6);
   });
 
+  it("beginLine while audio is still queued appends instead of overlapping (brief 08 item 5)", () => {
+    const { ctx, sources } = fakeContext(10);
+    const player = new PcmPlayer(ctx);
+    player.beginLine();
+    player.push(new Uint8Array(new ArrayBuffer(4800))); // 100 ms of news audio
+    const firstStart = sources[0]!.startedAt!;
+    player.beginLine(); // reporter line begins while news is still queued
+    player.push(new Uint8Array(new ArrayBuffer(4800))); // 100 ms reporter audio
+    expect(sources).toHaveLength(2);
+    // Reporter chunk starts when the news chunk ends, not 120 ms from now.
+    expect(sources[1]!.startedAt).toBeCloseTo(firstStart + 0.1, 6);
+    expect(player.millisecondsUntilEnd()).toBeCloseTo(JITTER_BUFFER_MS + 200, 3);
+  });
+
   it("reports time until the scheduled audio ends", () => {
     const { ctx } = fakeContext(2);
     const player = new PcmPlayer(ctx);
