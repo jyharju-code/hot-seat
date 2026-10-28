@@ -1,11 +1,15 @@
 import {
+  FRONT_PAGE_STEPS,
   debriefSchema,
   isProfileScenario,
+  nextFrontPageStep,
   type Debrief,
+  type FrontPageResult,
+  type FrontPageStep,
   type GeneratedScenario,
 } from "@hot-seat/shared";
 import { MIN_REASONING_MAX_TOKENS, type Llm } from "./providers/llm.js";
-import type { ImageGen, ImageResult } from "./providers/image-gen.js";
+import { classifyImageError, type ImageGen, type ImageResult } from "./providers/image-gen.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
 import { formatEvents, formatHarvestedQuotes, formatTranscript, harvestedQuotes, type TimedTurn } from "./session/store.js";
 
@@ -131,7 +135,7 @@ export async function buildFrontPagePrompt(
     quotes,
   });
   if (profile) {
-    prompt += `\nThis is a friendly feature page, not a crisis page: warm layout, the owner smiling in the large lead photo, anniversary warmth in the design. Let the headline and pull quote, built from the owner's most damaging harvested quote above, sit in sharp contrast to that warmth.`;
+    prompt += `\nThis is a friendly feature page, not a crisis page: warm layout, the owner smiling in the large lead photo, anniversary warmth in the design. Print the headline and pull quote exactly as given above.`;
   }
   if (!hasPhoto) {
     // No camera still: describe the lead photo instead of referencing one.
@@ -164,16 +168,143 @@ export interface FrontPageRequest {
   still?: { image: Uint8Array; mimeType: string } | null;
 }
 
-/** Generate (no still) or edit (with still) the front page via the ImageGen port. */
+function paperStyleFor(scenario: GeneratedScenario): string {
+  if (isProfileScenario(scenario)) return "a friendly local newspaper feature page, warm and smiling in layout";
+  return scenario.format === "press_conference" ? "a serious national broadsheet newspaper" : "a local newspaper";
+}
+
+function paperNameFor(scenario: GeneratedScenario): string {
+  return scenario.journalists[0]?.outlet ?? "The Local Courier";
+}
+
+function frontPageQuotes(debrief: Debrief): string[] {
+  const texts = [debrief.headline_quote, debrief.best_moments[0]?.quote]
+    .map((q) => q?.trim())
+    .filter((q): q is string => Boolean(q));
+  return [...new Set(texts)];
+}
+
+/**
+ * Minimal front-page prompt: layout, paper name, date, headline and subhead
+ * only. No story summary, facts or quotes. Headline and subhead stay verbatim.
+ */
+export async function buildMinimalFrontPagePrompt(
+  debrief: Debrief,
+  scenario: GeneratedScenario,
+  variant: "photo" | "storefront",
+  tomorrow = tomorrowDateString(),
+): Promise<string> {
+  const template = await loadPrompt("front-page-minimal.md");
+  const leadImage =
+    variant === "photo"
+      ? "Use this exact photo as the large lead image, styled as press photography. Keep the person's expression and pose unchanged."
+      : `Use as the large lead image a photograph of the storefront of ${scenario.company.name}, styled as press photography.`;
+  return fillTemplate(template, {
+    paper_style: paperStyleFor(scenario),
+    fictional_paper_name: paperNameFor(scenario),
+    tomorrow,
+    headline: debrief.front_page.headline,
+    subhead: debrief.front_page.subhead,
+    lead_image: leadImage,
+  });
+}
+
+/** HTML-fallback payload rendered in the browser as a newspaper front page. */
+export function buildHtmlFrontPage(
+  debrief: Debrief,
+  scenario: GeneratedScenario,
+  still?: { image: Uint8Array; mimeType: string } | null,
+  tomorrow = tomorrowDateString(),
+): FrontPageResult {
+  return {
+    kind: "html",
+    step: "html",
+    paperName: paperNameFor(scenario),
+    date: tomorrow,
+    headline: debrief.front_page.headline,
+    subhead: debrief.front_page.subhead,
+    companyName: scenario.company.name,
+    summary: scenario.crisis.summary,
+    keyFacts: scenario.public_facts.slice(0, 5),
+    quotes: frontPageQuotes(debrief),
+    photoBase64: still ? Buffer.from(still.image).toString("base64") : null,
+    photoMime: still ? still.mimeType : null,
+    profile: isProfileScenario(scenario),
+  };
+}
+
+export interface GenerateFrontPageOptions {
+  startStep?: FrontPageStep;
+  log?: (line: string) => void;
+  tomorrow?: string;
+}
+
+export interface FrontPageOutcome {
+  frontPage: FrontPageResult;
+  step: FrontPageStep;
+  nextStep: FrontPageStep | null;
+}
+
+function imageOutcome(result: ImageResult, step: Exclude<FrontPageStep, "html">): FrontPageOutcome {
+  return {
+    frontPage: {
+      kind: "image",
+      imageBase64: Buffer.from(result.image).toString("base64"),
+      mime: result.mimeType,
+      step,
+    },
+    step,
+    nextStep: nextFrontPageStep(step),
+  };
+}
+
+/**
+ * Front-page fallback ladder. Never throws: filtered or 4xx steps move down
+ * to a minimal edit, then a storefront generation, then an HTML page.
+ */
 export async function generateFrontPage(
   imageGen: ImageGen,
   debrief: Debrief,
   scenario: GeneratedScenario,
   still?: { image: Uint8Array; mimeType: string } | null,
-): Promise<ImageResult> {
-  const prompt = await buildFrontPagePrompt(debrief, scenario, Boolean(still));
-  if (still) {
-    return imageGen.editPhoto({ image: still.image, mimeType: still.mimeType, prompt });
+  options: GenerateFrontPageOptions = {},
+): Promise<FrontPageOutcome> {
+  const log = options.log ?? (() => undefined);
+  const tomorrow = options.tomorrow ?? tomorrowDateString();
+  const start = options.startStep ?? "edit_full";
+  const steps = FRONT_PAGE_STEPS.slice(FRONT_PAGE_STEPS.indexOf(start));
+  for (const step of steps) {
+    if (step === "html") {
+      log(`[front-page] step=html result=ok promptLength=0`);
+      return { frontPage: buildHtmlFrontPage(debrief, scenario, still, tomorrow), step: "html", nextStep: null };
+    }
+    if (step === "edit_minimal" && !still) continue;
+    let prompt: string;
+    try {
+      prompt =
+        step === "edit_full"
+          ? await buildFrontPagePrompt(debrief, scenario, Boolean(still), tomorrow)
+          : await buildMinimalFrontPagePrompt(
+              debrief,
+              scenario,
+              step === "generate_storefront" ? "storefront" : "photo",
+              tomorrow,
+            );
+    } catch {
+      log(`[front-page] step=${step} result=error promptLength=0`);
+      continue;
+    }
+    try {
+      const result =
+        step === "generate_storefront" || !still
+          ? await imageGen.generateImage(prompt)
+          : await imageGen.editPhoto({ image: still.image, mimeType: still.mimeType, prompt });
+      log(`[front-page] step=${step} result=ok promptLength=${prompt.length}`);
+      return imageOutcome(result, step);
+    } catch (err) {
+      log(`[front-page] step=${step} result=${classifyImageError(err)} promptLength=${prompt.length}`);
+    }
   }
-  return imageGen.generateImage(prompt);
+  log(`[front-page] step=html result=ok promptLength=0`);
+  return { frontPage: buildHtmlFrontPage(debrief, scenario, still, tomorrow), step: "html", nextStep: null };
 }

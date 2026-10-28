@@ -337,6 +337,8 @@ export interface NewsClipResponse {
   audioUrl: string;
   timeline: NewsTimelinePart[];
   studioImageUrl: string | null;
+  /** True when the studio image failed and the client shows a plain CSS studio. */
+  studioFallback?: boolean;
   channel: string;
   chyron: string;
   ticker: string[];
@@ -378,10 +380,32 @@ export const debriefSchema = z.object({
 });
 export type Debrief = z.infer<typeof debriefSchema>;
 
-export interface FrontPageResult {
-  imageBase64: string;
-  mime: string;
+export const FRONT_PAGE_STEPS = ["edit_full", "edit_minimal", "generate_storefront", "html"] as const;
+export type FrontPageStep = (typeof FRONT_PAGE_STEPS)[number];
+
+/** The step after `step` in the fallback ladder, or null at the last step. */
+export function nextFrontPageStep(step: FrontPageStep): FrontPageStep | null {
+  const i = FRONT_PAGE_STEPS.indexOf(step);
+  return i >= 0 && i < FRONT_PAGE_STEPS.length - 1 ? FRONT_PAGE_STEPS[i + 1]! : null;
 }
+
+export type FrontPageResult =
+  | { kind: "image"; imageBase64: string; mime: string; step: Exclude<FrontPageStep, "html"> }
+  | {
+      kind: "html";
+      step: "html";
+      paperName: string;
+      date: string;
+      headline: string;
+      subhead: string;
+      companyName: string;
+      summary: string;
+      keyFacts: string[];
+      quotes: string[];
+      photoBase64: string | null;
+      photoMime: string | null;
+      profile: boolean;
+    };
 
 export interface DebriefResponse {
   debrief: Debrief;

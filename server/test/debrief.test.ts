@@ -314,7 +314,7 @@ describe("POST /api/sessions/:id/debrief", () => {
     await app.close();
   });
 
-  it("still returns the debrief when image generation fails", async () => {
+  it("still returns the debrief and an HTML front page when image generation fails (brief 15)", async () => {
     const imageGen: ImageGen = {
       generateImage: async () => {
         throw new Error("image API down");
@@ -330,7 +330,8 @@ describe("POST /api/sessions/:id/debrief", () => {
     expect(res.json().frontPage).toBeNull();
     const fp = await pollFrontPage(app, id);
     expect(fp.statusCode).toBe(200);
-    expect(fp.json().frontPage).toBeNull();
+    expect(fp.json().frontPage.kind).toBe("html");
+    expect(fp.json().frontPage.headline).toBe(sampleDebrief.front_page.headline);
     await app.close();
   });
 

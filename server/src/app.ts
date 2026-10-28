@@ -7,8 +7,9 @@ import type {
   ProvidersResponse,
 } from "@hot-seat/shared";
 import { providerStatuses, type Config } from "./config.js";
-import { DebriefCoach, generateFrontPage, type DebriefGenerator } from "./debrief.js";
-import { MetaImageGen, type ImageGen } from "./providers/image-gen.js";
+import { buildHtmlFrontPage, DebriefCoach, generateFrontPage, type DebriefGenerator } from "./debrief.js";
+import { classifyImageError, MetaImageGen, type ImageGen } from "./providers/image-gen.js";
+import { FRONT_PAGE_STEPS, type FrontPageStep } from "@hot-seat/shared";
 import { MetaLlm } from "./providers/meta-llm.js";
 import { CrisisDirector, type ScenarioGenerator } from "./scenarios/director.js";
 import { presets, profilePresets } from "./scenarios/presets.js";
@@ -120,43 +121,49 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
         : null;
 
   type FrontPageState =
-    | { status: "pending"; frontPage: null }
-    | { status: "ready"; frontPage: FrontPageResult }
-    | { status: "failed"; frontPage: null };
+    | { status: "pending"; frontPage: null; step: null; nextStep: null }
+    | { status: "ready"; frontPage: FrontPageResult; step: FrontPageStep; nextStep: FrontPageStep | null };
   const frontPages = new Map<string, FrontPageState>();
+  type FrontPageContext = {
+    debrief: Parameters<typeof generateFrontPage>[1];
+    scenario: Parameters<typeof generateFrontPage>[2];
+    still: { image: Uint8Array; mimeType: string } | null;
+  };
+  const frontPageContexts = new Map<string, FrontPageContext>();
 
   const startFrontPage = (
     sessionId: string,
     debrief: Parameters<typeof generateFrontPage>[1],
     scenario: Parameters<typeof generateFrontPage>[2],
     still: { image: Uint8Array; mimeType: string } | null,
+    startStep: FrontPageStep = "edit_full",
   ): void => {
+    frontPageContexts.set(sessionId, { debrief, scenario, still });
     if (!imageGen) {
-      frontPages.set(sessionId, { status: "failed", frontPage: null });
-      app.log.info("[front-page] skipped: image generation is not configured");
+      app.log.info("[front-page] step=html result=ok promptLength=0");
+      frontPages.set(sessionId, {
+        status: "ready",
+        frontPage: buildHtmlFrontPage(debrief, scenario, still),
+        step: "html",
+        nextStep: null,
+      });
       return;
     }
-    frontPages.set(sessionId, { status: "pending", frontPage: null });
+    frontPages.set(sessionId, { status: "pending", frontPage: null, step: null, nextStep: null });
     const imageStarted = performance.now();
     void (async () => {
-      try {
-        const result = await generateFrontPage(imageGen, debrief, scenario, still);
-        const imageMs = Math.round(performance.now() - imageStarted);
-        app.log.info(`[front-page] generated in ${imageMs}ms`);
-        frontPages.set(sessionId, {
-          status: "ready",
-          frontPage: {
-            imageBase64: Buffer.from(result.image).toString("base64"),
-            mime: result.mimeType,
-          },
-        });
-      } catch (err) {
-        const imageMs = Math.round(performance.now() - imageStarted);
-        app.log.error(
-          `[front-page] generation failed after ${imageMs}ms: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        frontPages.set(sessionId, { status: "failed", frontPage: null });
-      }
+      const outcome = await generateFrontPage(imageGen, debrief, scenario, still, {
+        startStep,
+        log: (line) => app.log.info(line),
+      });
+      const imageMs = Math.round(performance.now() - imageStarted);
+      app.log.info(`[front-page] generated in ${imageMs}ms step=${outcome.step}`);
+      frontPages.set(sessionId, {
+        status: "ready",
+        frontPage: outcome.frontPage,
+        step: outcome.step,
+        nextStep: outcome.nextStep,
+      });
     })();
   };
 
@@ -192,9 +199,17 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     if (!studioPromise) {
       studioPromise = imageGen
         .generateImage(STUDIO_IMAGE_PROMPT)
-        .then((r) => ({ image: r.image, mimeType: r.mimeType }))
+        .then((r) => {
+          app.log.info(
+            `[front-page] step=generate_storefront result=ok promptLength=${STUDIO_IMAGE_PROMPT.length} surface=news_studio`,
+          );
+          return { image: r.image, mimeType: r.mimeType };
+        })
         .catch((err: unknown) => {
-          app.log.error(`[news-clip] studio image failed: ${err instanceof Error ? err.message : String(err)}`);
+          app.log.info(
+            `[front-page] step=generate_storefront result=${classifyImageError(err)} promptLength=${STUDIO_IMAGE_PROMPT.length} surface=news_studio`,
+          );
+          app.log.info(`[front-page] step=html result=ok promptLength=0 surface=news_studio`);
           return null;
         });
     }
@@ -278,6 +293,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       audioUrl: `/api/sessions/${sessionId}/news-clip/audio`,
       timeline: entry.timeline,
       studioImageUrl: entry.studio ? `/api/sessions/${sessionId}/news-clip/studio-image` : null,
+      studioFallback: !entry.studio,
       channel: news.channel,
       chyron: news.chyron,
       ticker: news.ticker,
@@ -323,9 +339,28 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       return { frontPage: null };
     }
     if (entry.status === "pending") {
-      return reply.code(202).send({ status: "printing", frontPage: null });
+      return reply.code(202).send({ status: "printing", frontPage: null, step: null, nextStep: null });
     }
-    return { frontPage: entry.frontPage };
+    return { frontPage: entry.frontPage, step: entry.step, nextStep: entry.nextStep };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/sessions/:id/front-page/retry", async (request, reply) => {
+    const sessionId = request.params.id;
+    const record = sessions.get(sessionId);
+    if (!record) return reply.code(404).send({ error: "Unknown session." });
+    const ctx = frontPageContexts.get(sessionId);
+    if (!ctx) return reply.code(404).send({ error: "Front page has not started printing." });
+    const body = (request.body ?? {}) as { startStep?: unknown; step?: unknown };
+    const requested = body.startStep ?? body.step;
+    const current = frontPages.get(sessionId);
+    const fallbackStep: FrontPageStep =
+      current?.status === "ready" ? (current.nextStep ?? "html") : "edit_full";
+    const startStep: FrontPageStep =
+      typeof requested === "string" && (FRONT_PAGE_STEPS as readonly string[]).includes(requested)
+        ? (requested as FrontPageStep)
+        : fallbackStep;
+    startFrontPage(sessionId, ctx.debrief, ctx.scenario, ctx.still, startStep);
+    return reply.code(202).send({ status: "printing", frontPage: null, step: null, nextStep: null });
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>(

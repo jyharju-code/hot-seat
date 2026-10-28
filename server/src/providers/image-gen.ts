@@ -18,6 +18,35 @@ export interface ImageGen {
   generateImage(prompt: string): Promise<ImageResult>;
 }
 
+/** Error from the image API with its HTTP status and provider code, when known. */
+export class ImageApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  constructor(message: string, status: number, code: string | null = null) {
+    super(message);
+    this.name = "ImageApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** "filtered" for a content-policy or any other 4xx rejection, else "error". */
+export function classifyImageError(err: unknown): "filtered" | "error" {
+  if (err instanceof ImageApiError) {
+    return err.code === "content_policy_violation" || (err.status >= 400 && err.status < 500)
+      ? "filtered"
+      : "error";
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("content_policy_violation")) return "filtered";
+  const m = /:\s(4\d\d)\b/.exec(msg);
+  return m ? "filtered" : "error";
+}
+
+export function isFilteredImageError(err: unknown): boolean {
+  return classifyImageError(err) === "filtered";
+}
+
 export class StubImageGen implements ImageGen {
   async editPhoto(_input: ImageEditInput): Promise<ImageResult> {
     throw new NotImplementedError("ImageGen (Muse Image)");
@@ -93,7 +122,8 @@ export class MetaImageGen implements ImageGen {
       } catch {
         /* ignore */
       }
-      throw new Error(`Meta Muse Image ${kind} failed: ${res.status} ${detail}`);
+      const code = detail.includes("content_policy_violation") ? "content_policy_violation" : null;
+      throw new ImageApiError(`Meta Muse Image ${kind} failed: ${res.status} ${detail}`, res.status, code);
     }
     const data = (await res.json()) as ImagesResponse;
     const first = data.data?.[0];

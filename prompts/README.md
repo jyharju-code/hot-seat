@@ -35,6 +35,10 @@ repository README; no code came with them.
   `{paper_style}`, `{fictional_paper_name}`, `{tomorrow}`, `{headline}`,
   `{subhead}`, `{company_name}`, `{crisis_summary}`, `{key_facts}` and
   `{quotes}` at runtime.
+- `front-page-minimal.md`: the fallback front-page prompt (layout, paper
+  name, date, headline and subhead only). Fill `{paper_style}`,
+  `{fictional_paper_name}`, `{tomorrow}`, `{headline}`, `{subhead}` and
+  `{lead_image}` at runtime.
 - `profile-director.md`: builds a friendly profile scenario (occasion, 3
   owner-known sensitivities the reporter does not know). Fill `{language}`
   and `{spoken_style}` at runtime.

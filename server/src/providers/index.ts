@@ -19,8 +19,11 @@ export {
   type TextToSpeechOptions,
 } from "./text-to-speech.js";
 export {
+  ImageApiError,
   MetaImageGen,
   StubImageGen,
+  classifyImageError,
+  isFilteredImageError,
   type ImageGen,
   type ImageEditInput,
   type ImageResult,
