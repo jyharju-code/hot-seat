@@ -4,6 +4,7 @@ import { Duplex } from "node:stream";
 import tls from "node:tls";
 import WebSocket from "ws";
 import { NotImplementedError } from "./errors.js";
+import { extractWordTimings } from "../news/soundbite.js";
 
 /** Minimal HTTP CONNECT proxy agent so wss works behind HTTPS_PROXY (fetch honours it, ws does not). */
 class ConnectProxyAgent extends https.Agent {
@@ -44,10 +45,16 @@ export interface SpeechToTextOptions {
   language?: "en" | "fi";
 }
 
+export interface SttWordTiming {
+  word: string;
+  startMs: number;
+  endMs: number;
+}
+
 export type SttEvent =
-  | { type: "partial"; text: string }
+  | { type: "partial"; text: string; wordTimings?: SttWordTiming[] }
   | { type: "endpoint" }
-  | { type: "final"; text: string; turnId?: string }
+  | { type: "final"; text: string; turnId?: string; wordTimings?: SttWordTiming[] }
   | { type: "error"; message: string };
 
 /** One realtime STT session. push() PCM16 16 kHz frames, end() with endStream. */
@@ -283,7 +290,13 @@ class MuseSttSession implements SttSession {
     if (type === "speechComplete") {
       const transcript = typeof msg.transcript === "string" ? msg.transcript : "";
       const turnId = typeof msg.turnId === "string" ? msg.turnId : undefined;
-      this.emit(turnId ? { type: "final", text: transcript, turnId } : { type: "final", text: transcript });
+      const wordTimings = extractWordTimings(msg) ?? undefined;
+      this.emit({
+        type: "final",
+        text: transcript,
+        ...(turnId ? { turnId } : {}),
+        ...(wordTimings ? { wordTimings } : {}),
+      });
       return;
     }
     // Partial transcripts: shape is not fully documented, accept common fields.
@@ -297,7 +310,8 @@ class MuseSttSession implements SttSession {
             : undefined;
     if (partialText !== undefined && /partial|transcript|speech/i.test(type)) {
       for (const cb of this.partialCbs) cb(partialText);
-      this.emit({ type: "partial", text: partialText });
+      const wordTimings = extractWordTimings(msg) ?? undefined;
+      this.emit(wordTimings ? { type: "partial", text: partialText, wordTimings } : { type: "partial", text: partialText });
       return;
     }
   }

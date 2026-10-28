@@ -24,6 +24,8 @@ const envSchema = z.object({
   LISTEN_IDLE_MS: z.coerce.number().int().positive().max(3_600_000).default(60_000),
   MAX_SESSION_MS: z.coerce.number().int().positive().max(3_600_000).default(720_000),
   INTERRUPTS: z.enum(["on", "off"]).default("on"),
+  /** Calibrated ASR lag subtracted when mapping partials to audio (Brief 14). */
+  ASR_LAG_MS: z.coerce.number().int().nonnegative().max(60_000).default(350),
 });
 
 export type Config = z.infer<typeof envSchema> & {
@@ -37,6 +39,7 @@ export type Config = z.infer<typeof envSchema> & {
   scenarioModel: string;
   scenarioReasoning: string;
   interruptsEnabled: boolean;
+  asrLagMs: number;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -57,6 +60,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     scenarioModel: parsed.data.SCENARIO_MODEL ?? parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
     scenarioReasoning: parsed.data.SCENARIO_REASONING ?? "medium",
     interruptsEnabled: parsed.data.INTERRUPTS !== "off",
+    asrLagMs: parsed.data.ASR_LAG_MS,
   };
 }
 

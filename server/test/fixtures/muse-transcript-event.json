@@ -1,0 +1,5 @@
+{
+  "comment": "One raw Muse Voice Transcribe realtime transcript event, logged in a test fixture (Brief 14 section 2). No keys. Shape as handled by MuseSttSession.handleText: only transcript text, no word or segment timestamps, so word times come from partial first-appearance mapping minus the ASR lag.",
+  "event": { "type": "transcript", "transcript": "We knew nothing about it" },
+  "finalEvent": { "type": "speechComplete", "transcript": "We knew nothing about it.", "turnId": "turn-1" }
+}

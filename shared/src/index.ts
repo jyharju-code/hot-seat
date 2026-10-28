@@ -304,6 +304,47 @@ export const debriefLandmineSchema = z
   }));
 export type DebriefLandmine = z.infer<typeof debriefLandmineSchema>;
 
+const wordCount = (text: string): number => text.trim().split(/\s+/).filter(Boolean).length;
+const maxWords = (max: number) => (text: string) => wordCount(text) <= max;
+
+/** Evening news item for the debrief (Brief 14). Old debriefs omit it. */
+export const debriefNewsSchema = z.object({
+  soundbite: z
+    .string()
+    .min(1)
+    .refine((t) => wordCount(t) >= 4 && wordCount(t) <= 15, {
+      message: "soundbite must be 4 to 15 words",
+    }),
+  /** 1-based owner turn the soundbite came from (first owner answer is 1). */
+  soundbite_turn: z.number().int().min(1),
+  channel: z.string().min(1),
+  anchor_intro: z.string().min(1).refine(maxWords(35), { message: "anchor_intro must be at most 35 words" }),
+  anchor_outro: z.string().min(1).refine(maxWords(20), { message: "anchor_outro must be at most 20 words" }),
+  chyron: z.string().min(1).refine(maxWords(8), { message: "chyron must be at most 8 words" }),
+  ticker: z.array(z.string().min(1)).length(3),
+});
+export type DebriefNews = z.infer<typeof debriefNewsSchema>;
+
+export interface NewsTimelinePart {
+  part: "intro" | "soundbite" | "outro";
+  startMs: number;
+  endMs: number;
+  text: string;
+}
+
+/** Response of GET /api/sessions/:sessionId/news-clip when ready. */
+export interface NewsClipResponse {
+  audioUrl: string;
+  timeline: NewsTimelinePart[];
+  studioImageUrl: string | null;
+  channel: string;
+  chyron: string;
+  ticker: string[];
+  ownerStillUrl: string | null;
+  soundbite: string;
+  soundbiteLocated: boolean;
+}
+
 export const debriefSchema = z.object({
   scores: z.object({
     clarity: score,
@@ -331,6 +372,8 @@ export const debriefSchema = z.object({
   gave_away: z
     .array(z.object({ quote: z.string(), framing: z.string(), better: z.string() }))
     .optional(),
+  /** Evening news item (Brief 14). Old debriefs omit it and show no clip. */
+  news: debriefNewsSchema.optional(),
   one_thing_to_practice: z.string(),
 });
 export type Debrief = z.infer<typeof debriefSchema>;

@@ -37,6 +37,17 @@ Profile mode ("profile" above) adds these rules:
 - The front page is a friendly feature page. Build its headline and pull quote from the
   most damaging harvested quote when there is one.
 
+Evening news rules (both modes):
+- Add "news": a fictional local TV news item. Tone: pointed and dry, like a real local news
+  item that picked the worst soundbite. Never mock the person's voice, accent, appearance
+  or language skills. At most one wry line, in the outro only.
+- "soundbite": the owner's exact words, 4 to 15 words, from one owner turn, the most
+  damaging out of context. Quote exactly as spoken in that turn.
+- "soundbite_turn": that owner turn counted from 1 (the first owner answer is 1).
+- "channel": a fictional local TV channel name. "anchor_intro": spoken, max 35 words, sets
+  up the story. "anchor_outro": spoken, max 20 words, dry. "chyron": max 8 words.
+  "ticker": 3 short lines.
+
 Return ONLY JSON:
 {"scores": {"clarity": 0-100, "accountability": 0-100, "composure": 0-100,
             "message_discipline": 0-100, "empathy": 0-100},
@@ -47,4 +58,5 @@ Return ONLY JSON:
  "front_page": {"headline": "max 8 words, built from their own words", "subhead": "max 14 words"},
  "landmines": [{"id": "L1", "status": "disclosed_proactively|raised_and_handled|raised_and_fumbled|not_raised", "comment": ""}],
  "gave_away": [{"quote": "harvested quote verbatim (profile only)", "framing": "how the paper will frame it", "better": "a warmer, safer way to say the same thing"}],
+ "news": {"soundbite": "owner's exact words, 4 to 15 words, from one turn", "soundbite_turn": 1, "channel": "fictional local TV channel name", "anchor_intro": "max 35 words, spoken", "anchor_outro": "max 20 words, spoken, dry", "chyron": "max 8 words", "ticker": ["short line", "short line", "short line"]},
  "one_thing_to_practice": ""}

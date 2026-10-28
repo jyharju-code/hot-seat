@@ -9,6 +9,7 @@ export {
   type SpeechToTextOptions,
   type SttEvent,
   type SttSession,
+  type SttWordTiming,
   type TranscriptEvent,
 } from "./speech-to-text.js";
 export {

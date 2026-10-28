@@ -4,6 +4,8 @@ import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
+import { getOrCreateOwnerAudio, type OwnerAudioBuffer } from "./owner-audio.js";
+import type { WordTime } from "../news/soundbite.js";
 import {
   PARTIAL_STABLE_MS,
   TURN_CAP_MS,
@@ -81,6 +83,9 @@ export interface OrchestratorDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Called when the session ends itself (idle / max length), after `ended` is sent. */
   onSessionEnded?: () => void;
+  /** Owner mic capture for the news clip. Defaults to the registry entry for `record`. */
+  ownerAudio?: OwnerAudioBuffer;
+  asrLagMs?: number;
 }
 
 export const NEWS_VOICE_ID = "3WqHLnw80rOZqJzW9YRB";
@@ -172,10 +177,20 @@ export class SessionOrchestrator {
   private sttFailures = 0;
   private lastSttError = "STT session closed";
 
+  private readonly ownerAudio: OwnerAudioBuffer | null;
+  private pendingNativeWordTimes: WordTime[] | null = null;
+
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
     this.now = deps.now ?? (() => performance.now());
     this.log = deps.log ?? (() => undefined);
+    this.ownerAudio =
+      deps.ownerAudio ?? (deps.record ? getOrCreateOwnerAudio(deps.record.id, deps.asrLagMs ?? 350) : null);
+  }
+
+  /** Owner mic capture kept in memory for the news clip (null without a record). */
+  get ownerAudioBuffer(): OwnerAudioBuffer | null {
+    return this.ownerAudio;
   }
 
   get currentState(): SessionState {
@@ -359,6 +374,7 @@ export class SessionOrchestrator {
   /** Forward one mic frame. Dropped unless listening (half duplex). */
   pushAudio(pcm: Uint8Array): void {
     if (this.state !== "listening" || !this.sttSession) return;
+    this.ownerAudio?.push(pcm, this.now());
     this.keepAlive?.noteFrame(pcm.length);
     this.sttSession.push(pcm);
   }
@@ -507,6 +523,9 @@ export class SessionOrchestrator {
     // outside the per-session loop below, so an STT reopen inside one answer
     // keeps the answer start time and the interrupt bookkeeping.
     let latestPartial = "";
+    let nativeWordTimes: WordTime[] | null = null;
+    // Exposed to handleFinal/handleInterrupt via the instance for sealing.
+    this.pendingNativeWordTimes = null;
     // Raw cumulative partial of the current STT segment, not yet a final.
     // Sealed into `parts` when its session dies (see sessionDead handling).
     let pendingPartial = "";
@@ -691,6 +710,11 @@ export class SessionOrchestrator {
             // Prefix with collected finals / sealed segments, so a partial
             // from a reopened session continues the full answer text.
             latestPartial = [...parts, text].join(" ");
+            this.ownerAudio?.notePartial(latestPartial);
+            if (ev.wordTimings?.length) {
+              nativeWordTimes = ev.wordTimings.map((w, i) => ({ index: i, word: w.word, startMs: w.startMs }));
+              this.pendingNativeWordTimes = nativeWordTimes;
+            }
             if (latestPartial !== partialCandidate) {
               // New words (or a revision): any in-flight speculative call
               // was started on different text, so abort it as before.
@@ -713,6 +737,11 @@ export class SessionOrchestrator {
           parts.push(segment);
           pendingPartial = "";
           latestPartial = parts.join(" ");
+          this.ownerAudio?.notePartial(latestPartial);
+          if (ev.wordTimings?.length) {
+            nativeWordTimes = ev.wordTimings.map((w, i) => ({ index: i, word: w.word, startMs: w.startMs }));
+            this.pendingNativeWordTimes = nativeWordTimes;
+          }
           lastFinalAt = this.now();
           lastSpeechAt = lastFinalAt;
           partialCandidate = latestPartial;
@@ -909,6 +938,8 @@ export class SessionOrchestrator {
   private async handleInterrupt(req: { text: string; say: string; reason: string; decisionAt: number; latencyMs: number }): Promise<void> {
     this.abortSpeculative();
     this.teardownStt();
+    this.ownerAudio?.sealTurn(req.text.trim(), this.pendingNativeWordTimes);
+    this.pendingNativeWordTimes = null;
     this.turnIndex += 1;
     this.lastAnswerInterrupted = true;
     const cutText = req.text.trim();
@@ -956,6 +987,8 @@ export class SessionOrchestrator {
 
   private async handleFinal(text: string, speechEndAt: number, finalAt: number): Promise<void> {
     this.teardownStt(true);
+    this.ownerAudio?.sealTurn(text.trim(), this.pendingNativeWordTimes);
+    this.pendingNativeWordTimes = null;
     this.lastAnswerInterrupted = false;
     this.turnIndex += 1;
     const userText = text.trim();
