@@ -10,3 +10,10 @@ export async function loadPrompt(name: string): Promise<string> {
   if (!safe.endsWith(".md")) throw new Error(`Prompt name must end in .md: ${name}`);
   return readFile(path.join(promptsDir, safe), "utf8");
 }
+
+/** Fill {placeholders} in a prompt template. No library, unknown keys stay as-is. */
+export function fillTemplate(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key: string) =>
+    Object.prototype.hasOwnProperty.call(vars, key) ? vars[key]! : match,
+  );
+}

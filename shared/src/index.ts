@@ -1,4 +1,6 @@
-/** Types shared by server and web. Keep this module dependency free. */
+import { z } from "zod";
+
+/** Types shared by server and web. */
 
 export type ProviderId = "llm" | "speech-to-text" | "text-to-speech" | "image-gen";
 
@@ -45,3 +47,66 @@ export type SessionEvent =
   | { type: "debrief.ready"; sessionId: string; headline: string; at: string };
 
 export type SessionEventType = SessionEvent["type"];
+
+// ---------------------------------------------------------------------------
+// Live voice session protocol over /ws (Brief 02)
+// Binary frames: client to server PCM16 16 kHz, server to client PCM 24 kHz.
+// JSON text frames use the schemas below on both sides.
+// ---------------------------------------------------------------------------
+
+export const reporterMoveSchema = z.enum(["follow_up", "new_angle", "confront", "pass"]);
+export type ReporterMove = z.infer<typeof reporterMoveSchema>;
+
+export const reporterFlagSchema = z.enum([
+  "dodge",
+  "contradiction",
+  "speculation",
+  "blame_shifting",
+  "empathy_missing",
+  "strong_answer",
+]);
+export type ReporterFlag = z.infer<typeof reporterFlagSchema>;
+
+export const reporterLineSchema = z.object({
+  move: reporterMoveSchema,
+  flags: z.array(reporterFlagSchema),
+  say: z.string().min(1),
+  quote_used: z.string().nullable(),
+});
+export type ReporterLine = z.infer<typeof reporterLineSchema>;
+
+export const sessionStateSchema = z.enum(["listening", "thinking", "speaking"]);
+export type SessionState = z.infer<typeof sessionStateSchema>;
+
+export const clientMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("start") }),
+  z.object({ type: z.literal("stop") }),
+]);
+export type ClientMessage = z.infer<typeof clientMessageSchema>;
+
+export const turnTimingSchema = z.object({
+  turn: z.number().int().nonnegative(),
+  /** ms from the user's speech end (speechEnd) to the final transcript. */
+  speechEndToFinalMs: z.number().nonnegative(),
+  /** ms from speech end to the LLM response (first token proxy: non-streaming chat). */
+  speechEndToLlmMs: z.number().nonnegative(),
+  /** ms from speech end to the first TTS audio byte. */
+  speechEndToFirstAudioMs: z.number().nonnegative(),
+  /** Total ms from speech end to first audio (same origin as the fields above). */
+  totalToFirstAudioMs: z.number().nonnegative(),
+});
+export type TurnTiming = z.infer<typeof turnTimingSchema>;
+
+export const serverMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("state"), state: sessionStateSchema }),
+  z.object({
+    type: z.literal("transcript"),
+    role: z.enum(["user", "reporter"]),
+    text: z.string(),
+  }),
+  z.object({ type: z.literal("reporter_line"), line: reporterLineSchema }),
+  z.object({ type: z.literal("audio_end") }),
+  z.object({ type: z.literal("timing"), timing: turnTimingSchema }),
+  z.object({ type: z.literal("error"), message: z.string() }),
+]);
+export type ServerMessage = z.infer<typeof serverMessageSchema>;

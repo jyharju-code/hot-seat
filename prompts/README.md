@@ -5,8 +5,21 @@ All prompts live here as Markdown files and are loaded at runtime by the server
 TypeScript: edit the Markdown file instead, and restart or reload the server to
 pick the change up.
 
-The actual prompt files arrive in the next brief. This folder intentionally
-contains only this README for now.
-
 Naming: use short lowercase names with hyphens, for example `scenario-build.md`
 or `reporter-question.md`.
+
+## Provenance
+
+These prompts were drafted before the hackathon (prior work) and refined here.
+They are part of the pre-hackathon prompt and voice drafting mentioned in the
+repository README; no code came with them.
+
+## Files
+
+- `spoken-style.md`: rules for lines that go straight to a text-to-speech voice.
+  It is spliced into the reporter prompts as `{spoken_style}`.
+- `journalist-turn.md`: one reporter turn. Fill `{name}`, `{outlet}`,
+  `{temperament}`, `{agenda}`, `{public_facts}`, `{transcript_tail}`,
+  `{last_answer}` and `{spoken_style}` at runtime.
+- `opening-question.md`: same persona, no `last_answer`; asks the first
+  question about the scenario.
