@@ -11,8 +11,8 @@ import { MetaImageGen, type ImageGen } from "./providers/image-gen.js";
 import { MetaLlm } from "./providers/meta-llm.js";
 import { CrisisDirector, type ScenarioGenerator } from "./scenarios/director.js";
 import { presets } from "./scenarios/presets.js";
-import { scenarioStore, type ScenarioStore } from "./scenarios/store.js";
-import { sessionStore, type SessionStore } from "./session/store.js";
+import { ScenarioStore } from "./scenarios/store.js";
+import { SessionStore } from "./session/store.js";
 
 export const SERVER_VERSION = "0.1.0";
 export const MAX_STILL_BYTES = 2 * 1024 * 1024;
@@ -27,7 +27,7 @@ export interface AppDeps {
 
 export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
   const app = Fastify({ logger: config.NODE_ENV !== "test" });
-  const store = deps.store ?? scenarioStore;
+  const store = deps.store ?? new ScenarioStore(config.dataDir);
 
   const generate: ScenarioGenerator =
     deps.generateScenario ??
@@ -78,7 +78,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     }
   });
 
-  const sessions = deps.sessions ?? sessionStore;
+  const sessions = deps.sessions ?? new SessionStore(config.dataDir);
 
   const debriefGen: DebriefGenerator =
     deps.generateDebrief ??
@@ -150,6 +150,14 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       }
       const debriefMs = Math.round(performance.now() - debriefStarted);
       app.log.info(`[debrief] generated in ${debriefMs}ms`);
+      if (record) {
+        record.debrief = debrief;
+        try {
+          sessions.put(record);
+        } catch {
+          /* persistence is best effort */
+        }
+      }
 
       // Start the image as soon as the debrief JSON exists.
       let frontPage: DebriefResponse["frontPage"] = null;

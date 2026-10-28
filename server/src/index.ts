@@ -12,13 +12,15 @@ import { JournalistBrain, loadJournalistPrompts, primaryJournalist } from "./jou
 import { LlmInterruptDecider } from "./interrupt.js";
 import { loadPrompt } from "./prompts.js";
 import { BasetenLlm, ElevenLabsTextToSpeech, MetaLlm, MuseSpeechToText } from "./providers/index.js";
-import { requireScenario, scenarioStore } from "./scenarios/store.js";
+import { requireScenario, ScenarioStore, SCENARIO_EXPIRED_MESSAGE } from "./scenarios/store.js";
 import { SessionOrchestrator } from "./session/orchestrator.js";
-import { sessionStore } from "./session/store.js";
+import { SessionStore } from "./session/store.js";
 import { voiceFor } from "./voices.js";
 
 const config = loadConfig();
-const app = buildApp(config);
+const scenarioStore = new ScenarioStore(config.dataDir);
+const sessionStore = new SessionStore(config.dataDir);
+const app = buildApp(config, { store: scenarioStore, sessions: sessionStore });
 
 console.log(
   `[config] MODEL_API_KEY ${config.MODEL_API_KEY ? "present" : "missing"}, ` +
@@ -38,6 +40,15 @@ app.server.on("upgrade", (request, socket, head) => {
 
 wss.on("connection", (ws: WebSocket) => {
   let orchestrator: SessionOrchestrator | null = null;
+  let currentRecord: ReturnType<typeof sessionStore.start> | null = null;
+  const persistFinished = () => {
+    if (!currentRecord) return;
+    try {
+      sessionStore.put(currentRecord);
+    } catch {
+      /* best effort */
+    }
+  };
 
   const sendJson = (value: unknown) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(value));
@@ -80,6 +91,7 @@ wss.on("connection", (ws: WebSocket) => {
             llm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel });
           }
           const record = sessionStore.start(scenarioId, scenario, Date.now());
+          currentRecord = record;
           const brain = new JournalistBrain(llm, prompts, turnModel);
           const interruptDecider = new LlmInterruptDecider(llm, await loadPrompt("interrupt-decision.md"), turnModel);
           const voice = voiceFor(journalist.temperament, journalist.voice);
@@ -107,7 +119,9 @@ wss.on("connection", (ws: WebSocket) => {
           });
           await orchestrator.start();
         } catch (err) {
-          sendJson({ type: "error", message: err instanceof Error ? err.message : String(err) });
+          const raw = err instanceof Error ? err.message : String(err);
+          const message = raw.startsWith("Unknown scenarioId") ? SCENARIO_EXPIRED_MESSAGE : raw;
+          sendJson({ type: "error", message });
         }
       })();
     } else if (msg.data.type === "playback_done") {
@@ -115,12 +129,14 @@ wss.on("connection", (ws: WebSocket) => {
     } else if (msg.data.type === "stop") {
       void orchestrator?.stop();
       orchestrator = null;
+      persistFinished();
     }
   });
 
   ws.on("close", () => {
     void orchestrator?.stop();
     orchestrator = null;
+    persistFinished();
   });
 });
 

@@ -15,11 +15,13 @@ const envSchema = z.object({
   TURN_LLM: z.enum(["meta", "baseten"]).default("meta"),
   SCENARIO_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   SCENARIO_REASONING: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  DATA_DIR: z.string().min(1).default("./data"),
   TURN_END_SILENCE_MS: z.coerce.number().int().positive().max(60_000).default(1500),
   INTERRUPTS: z.enum(["on", "off"]).default("on"),
 });
 
 export type Config = z.infer<typeof envSchema> & {
+  dataDir: string;
   llmChatModel: string;
   llmStructuredModel: string;
   turnLlm: "meta" | "baseten";
@@ -36,6 +38,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   return {
     ...parsed.data,
+    dataDir: parsed.data.DATA_DIR,
     llmChatModel: parsed.data.LLM_CHAT_MODEL ?? "muse-spark-1.3",
     llmStructuredModel: parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
     turnLlm: parsed.data.TURN_LLM,

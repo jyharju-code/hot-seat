@@ -1,26 +1,40 @@
 import { randomUUID } from "node:crypto";
-import type { GeneratedScenario } from "@hot-seat/shared";
+import { generatedScenarioSchema, type GeneratedScenario } from "@hot-seat/shared";
+import { dataDirFromEnv, FileStore, type Store } from "../store.js";
 
-/** In-memory scenario store. Scenarios live only for this server process. */
+export type ScenarioStoreOptions = string | { dataDir?: string; dir?: string; store?: Store<GeneratedScenario> };
+
+/** Scenario store backed by JSON files under DATA_DIR (in-memory cache in front). */
 export class ScenarioStore {
-  private readonly map = new Map<string, GeneratedScenario>();
+  private readonly backing: Store<GeneratedScenario>;
+  private count = 0;
+
+  constructor(options?: ScenarioStoreOptions) {
+    if (options && typeof options === "object" && options.store) {
+      this.backing = options.store;
+    } else {
+      const dir = typeof options === "string" ? options : (options?.dataDir ?? options?.dir ?? dataDirFromEnv());
+      this.backing = new FileStore<GeneratedScenario>(dir, generatedScenarioSchema, "scenarios-");
+    }
+  }
 
   add(scenario: GeneratedScenario): string {
     const id = randomUUID();
-    this.map.set(id, scenario);
+    this.backing.put(id, scenario);
+    this.count += 1;
     return id;
   }
 
   get(id: string): GeneratedScenario | undefined {
-    return this.map.get(id);
+    return this.backing.get(id);
   }
 
   has(id: string): boolean {
-    return this.map.has(id);
+    return this.backing.has(id);
   }
 
   get size(): number {
-    return this.map.size;
+    return this.count;
   }
 }
 
@@ -33,3 +47,5 @@ export function requireScenario(store: ScenarioStore, scenarioId: string): Gener
   if (!scenario) throw new Error(`Unknown scenarioId: ${scenarioId}`);
   return scenario;
 }
+
+export const SCENARIO_EXPIRED_MESSAGE = "This scenario has expired. Build it again.";

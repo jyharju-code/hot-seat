@@ -1,4 +1,14 @@
-import { formatMmSs, type GeneratedScenario, type ReporterFlag } from "@hot-seat/shared";
+import {
+  debriefSchema,
+  formatMmSs,
+  generatedScenarioSchema,
+  reporterFlagSchema,
+  type Debrief,
+  type GeneratedScenario,
+  type ReporterFlag,
+} from "@hot-seat/shared";
+import { z } from "zod";
+import { dataDirFromEnv, FileStore, type Store } from "../store.js";
 
 export interface TimedTurn {
   role: "user" | "reporter" | "news";
@@ -11,31 +21,97 @@ export interface TimedTurn {
   interruptReason?: string;
 }
 
+export const timedTurnSchema = z.object({
+  role: z.enum(["user", "reporter", "news"]),
+  text: z.string(),
+  elapsedSeconds: z.number().nonnegative(),
+  flags: z.array(reporterFlagSchema),
+  interruptReason: z.string().optional(),
+});
+
 export interface SessionRecord {
   /** Key used by POST /api/sessions/:id/debrief (the scenario store id). */
   id: string;
   scenario: GeneratedScenario;
   startedAtMs: number;
   turns: TimedTurn[];
+  /** Filled once a debrief has been generated for this finished session. */
+  debrief?: Debrief;
 }
 
-/** In-memory session transcripts, keyed by scenario id (latest session wins). */
+export const sessionRecordSchema = z.object({
+  id: z.string().min(1),
+  scenario: generatedScenarioSchema,
+  startedAtMs: z.number(),
+  turns: z.array(timedTurnSchema),
+  debrief: debriefSchema.optional(),
+});
+
+export type SessionStoreOptions = string | { dataDir?: string; dir?: string; store?: Store<SessionRecord> };
+
+/** Session transcripts backed by JSON files under DATA_DIR (cache in front). */
 export class SessionStore {
-  private readonly map = new Map<string, SessionRecord>();
+  private readonly backing: Store<SessionRecord>;
+  private readonly cache = new Map<string, SessionRecord>();
+
+  constructor(options?: SessionStoreOptions) {
+    if (options && typeof options === "object" && options.store) {
+      this.backing = options.store;
+    } else {
+      const dir = typeof options === "string" ? options : (options?.dataDir ?? options?.dir ?? dataDirFromEnv());
+      this.backing = new FileStore<SessionRecord>(dir, sessionRecordSchema, "sessions-");
+    }
+  }
+
+  private wrap(record: SessionRecord): SessionRecord {
+    const marker = record as SessionRecord & { __persistTurns?: boolean };
+    if (marker.__persistTurns) return record;
+    Object.defineProperty(record, "__persistTurns", { value: true, enumerable: false });
+    const persist = () => {
+      try {
+        this.backing.put(record.id, record);
+      } catch {
+        /* persistence is best effort during a live session */
+      }
+    };
+    record.turns = new Proxy(record.turns, {
+      set(target, prop, value) {
+        const ok = Reflect.set(target, prop, value);
+        if (prop === "length" || (typeof prop === "string" && /^\d+$/.test(prop))) persist();
+        return ok;
+      },
+    });
+    return record;
+  }
 
   start(id: string, scenario: GeneratedScenario, startedAtMs: number): SessionRecord {
     const record: SessionRecord = { id, scenario, startedAtMs, turns: [] };
-    this.map.set(id, record);
+    this.wrap(record);
+    this.cache.set(id, record);
+    this.backing.put(id, record);
     return record;
   }
 
   get(id: string): SessionRecord | undefined {
-    return this.map.get(id);
+    const cached = this.cache.get(id);
+    if (cached) return cached;
+    const loaded = this.backing.get(id);
+    if (!loaded) return undefined;
+    const wrapped = this.wrap(loaded);
+    this.cache.set(id, wrapped);
+    return wrapped;
   }
 
-  /** Replace a record (used by tests and the smoke script). */
+  /** Replace a record (used by tests and the smoke script). Persists it. */
   put(record: SessionRecord): void {
-    this.map.set(record.id, record);
+    this.wrap(record);
+    this.cache.set(record.id, record);
+    this.backing.put(record.id, record);
+  }
+
+  /** Persist the current state of a record (e.g. a finished session). */
+  save(record: SessionRecord): void {
+    this.put(record);
   }
 }
 
