@@ -70,7 +70,8 @@ export function buildReport(results: readonly SessionResult[], meta: { preset: s
     if (s.debrief) {
       lines.push(
         `Debrief (${s.profile}): debrief ${s.debrief.debrief_ms ?? s.debrief.ms} ms, front page ${s.debrief.front_page_ms ?? "n/a"} ms (${s.debrief.front_page ? "ready" : "missing"})` +
-          (s.debrief.headline ? `, headline: ${s.debrief.headline}` : ""),
+          (s.debrief.headline ? `, headline: ${s.debrief.headline}` : "") +
+          `, news clip ${s.debrief.news_clip_ms ?? "n/a"} ms (${s.debrief.news_clip ? "ready" : "missing"}, soundbite ${s.debrief.soundbite_located === null || s.debrief.soundbite_located === undefined ? "unknown" : s.debrief.soundbite_located ? "located" : "not located"})`,
         "",
       );
     }

@@ -20,7 +20,7 @@ import {
 import { estimateTtsChars, parseOwnerSegments } from "../scripts/sim/owner.js";
 import { ReporterLineQueue, linePlaybackMs } from "../scripts/sim/reporter-queue.js";
 import { estimateTotalChars, parseArgs } from "../scripts/sim/main.js";
-import { pollFrontPage } from "../scripts/sim/client.js";
+import { pollFrontPage, pollNewsClip } from "../scripts/sim/client.js";
 
 describe("sim WER", () => {
   it("is zero for identical text after normalisation", () => {
@@ -176,6 +176,23 @@ describe("sim owner segments and CLI", () => {
     expect(result.front_page).toBe(true);
     expect(calls).toBe(3);
     expect(urls.every((u) => u === "http://127.0.0.1:3001/api/sessions/sess-1/front-page")).toBe(true);
+  });
+
+  it("polls the news-clip endpoint through 202s and reports soundbite location", async () => {
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls += 1;
+      if (calls < 2) return { status: 202, ok: false, json: async () => ({ status: "building" }) };
+      return { status: 200, ok: true, json: async () => ({ soundbiteLocated: true }) };
+    }) as unknown as typeof fetch;
+    const result = await pollNewsClip("http://127.0.0.1:3001", "sess-1", {
+      fetchFn,
+      intervalMs: 1,
+      sleepFn: async () => undefined,
+    });
+    expect(result.news_clip).toBe(true);
+    expect(result.soundbite_located).toBe(true);
+    expect(result.ms).toBeGreaterThanOrEqual(0);
   });
 
   it("front-page polling gives up at the cap and reports a failed page", async () => {

@@ -36,6 +36,40 @@ export interface DebriefOutcome {
   front_page_ms: number | null;
   front_page: boolean;
   headline: string | null;
+  news_clip_ms?: number | null;
+  news_clip?: boolean;
+  soundbite_located?: boolean | null;
+}
+
+export interface NewsClipPollResult {
+  ms: number;
+  news_clip: boolean;
+  soundbite_located: boolean | null;
+}
+
+/** Poll the news-clip endpoint: 202 means building (wait 1 s), max 90 s. */
+export async function pollNewsClip(
+  httpBase: string,
+  sessionId: string,
+  opts: { fetchFn?: typeof fetch; intervalMs?: number; maxWaitMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
+): Promise<NewsClipPollResult> {
+  const fetchFn = opts.fetchFn ?? fetch;
+  const intervalMs = opts.intervalMs ?? 1000;
+  const maxWaitMs = opts.maxWaitMs ?? 90_000;
+  const sleepFn = opts.sleepFn ?? sleep;
+  const started = performance.now();
+  for (;;) {
+    const res = await fetchFn(`${httpBase}/api/sessions/${sessionId}/news-clip`);
+    const elapsed = Math.round(performance.now() - started);
+    if (res.status === 202) {
+      if (elapsed >= maxWaitMs) return { ms: elapsed, news_clip: false, soundbite_located: null };
+      await sleepFn(Math.min(intervalMs, Math.max(0, maxWaitMs - elapsed)));
+      continue;
+    }
+    if (!res.ok) return { ms: elapsed, news_clip: false, soundbite_located: null };
+    const body = (await res.json()) as { soundbiteLocated?: boolean };
+    return { ms: elapsed, news_clip: true, soundbite_located: body.soundbiteLocated ?? null };
+  }
 }
 
 export interface FrontPagePollResult {
@@ -385,22 +419,37 @@ export class SimSession {
     if (!res.ok) throw new Error(`debrief failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
     const body = (await res.json()) as { debrief?: { front_page?: { headline?: string } }; frontPage?: unknown };
     if (body.frontPage != null) {
+      const news = await pollNewsClip(this.opts.httpBase, sessionId);
+      this.log(
+        `news clip ${news.ms} ms (${news.news_clip ? "ready" : "missing"}, soundbite ${news.soundbite_located === null ? "unknown" : news.soundbite_located ? "located" : "not located"})`,
+      );
       return {
         ms: debriefMs,
         debrief_ms: debriefMs,
         front_page_ms: 0,
         front_page: true,
         headline: body.debrief?.front_page?.headline ?? null,
+        news_clip_ms: news.ms,
+        news_clip: news.news_clip,
+        soundbite_located: news.soundbite_located,
       };
     }
-    const polled = await pollFrontPage(this.opts.httpBase, sessionId);
-    this.log(`debrief ${debriefMs} ms, front page ${polled.ms} ms (${polled.front_page ? "ready" : "missing"})`);
+    const [polled, news] = await Promise.all([
+      pollFrontPage(this.opts.httpBase, sessionId),
+      pollNewsClip(this.opts.httpBase, sessionId),
+    ]);
+    this.log(
+      `debrief ${debriefMs} ms, front page ${polled.ms} ms (${polled.front_page ? "ready" : "missing"}), news clip ${news.ms} ms (${news.news_clip ? "ready" : "missing"}, soundbite ${news.soundbite_located === null ? "unknown" : news.soundbite_located ? "located" : "not located"})`,
+    );
     return {
       ms: debriefMs,
       debrief_ms: debriefMs,
       front_page_ms: polled.ms,
       front_page: polled.front_page,
       headline: body.debrief?.front_page?.headline ?? null,
+      news_clip_ms: news.ms,
+      news_clip: news.news_clip,
+      soundbite_located: news.soundbite_located,
     };
   }
 }

@@ -14,6 +14,11 @@ import { CrisisDirector, type ScenarioGenerator } from "./scenarios/director.js"
 import { presets, profilePresets } from "./scenarios/presets.js";
 import { ScenarioStore } from "./scenarios/store.js";
 import { SessionStore } from "./session/store.js";
+import { buildNewsClipAudio, NEWS_CLIP_VOICE_ID } from "./news/build-clip.js";
+import { STUDIO_IMAGE_PROMPT } from "./news/clip.js";
+import type { NewsTimelinePart } from "@hot-seat/shared";
+import { ElevenLabsTextToSpeech, type TextToSpeech } from "./providers/text-to-speech.js";
+import { ownerAudioRegistry } from "./session/owner-audio.js";
 
 export const SERVER_VERSION = "0.1.0";
 export const MAX_STILL_BYTES = 2 * 1024 * 1024;
@@ -24,6 +29,9 @@ export interface AppDeps {
   generateDebrief?: DebriefGenerator;
   imageGen?: ImageGen | null;
   sessions?: SessionStore;
+  /** Anchor TTS for the news clip. Null disables clip building. */
+  tts?: TextToSpeech | null;
+  newsVoiceId?: string;
 }
 
 export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
@@ -152,6 +160,155 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     })();
   };
 
+  const newsTts: TextToSpeech | null =
+    deps.tts !== undefined
+      ? deps.tts
+      : config.ELEVENLABS_API_KEY
+        ? new ElevenLabsTextToSpeech({ apiKey: config.ELEVENLABS_API_KEY, defaultVoiceId: NEWS_CLIP_VOICE_ID })
+        : null;
+
+  type Still = { image: Uint8Array; mimeType: string };
+  const stills = new Map<string, Still>();
+
+  type NewsClipState =
+    | { status: "pending" }
+    | {
+        status: "ready";
+        wav: Uint8Array;
+        timeline: NewsTimelinePart[];
+        soundbiteLocated: boolean;
+        reason: string | null;
+        buildMs: number;
+        studio: { image: Uint8Array; mimeType: string } | null;
+        still: Still | null;
+      }
+    | { status: "failed"; reason: string };
+  const newsClips = new Map<string, NewsClipState>();
+
+  // Studio image: generated once per server start and cached.
+  let studioPromise: Promise<{ image: Uint8Array; mimeType: string } | null> | null = null;
+  const getStudioImage = (): Promise<{ image: Uint8Array; mimeType: string } | null> => {
+    if (!imageGen) return Promise.resolve(null);
+    if (!studioPromise) {
+      studioPromise = imageGen
+        .generateImage(STUDIO_IMAGE_PROMPT)
+        .then((r) => ({ image: r.image, mimeType: r.mimeType }))
+        .catch((err: unknown) => {
+          app.log.error(`[news-clip] studio image failed: ${err instanceof Error ? err.message : String(err)}`);
+          return null;
+        });
+    }
+    return studioPromise;
+  };
+
+  const startNewsClip = (
+    sessionId: string,
+    debrief: Parameters<typeof generateFrontPage>[1],
+    turns: Parameters<DebriefGenerator>[1],
+    still: Still | null,
+  ): void => {
+    const news = debrief.news;
+    if (!news) return;
+    if (newsClips.has(sessionId)) return;
+    if (still) stills.set(sessionId, still);
+    if (!newsTts) {
+      newsClips.set(sessionId, { status: "failed", reason: "news TTS is not configured" });
+      app.log.info("[news-clip] skipped: TTS is not configured");
+      return;
+    }
+    newsClips.set(sessionId, { status: "pending" });
+    const started = performance.now();
+    void (async () => {
+      try {
+        const buffer = ownerAudioRegistry.get(sessionId);
+        const [built, studio] = await Promise.all([
+          buildNewsClipAudio({
+            news,
+            buffer,
+            turns,
+            tts: newsTts,
+            ...(deps.newsVoiceId ? { voiceId: deps.newsVoiceId } : {}),
+            log: (line) => app.log.info(line),
+          }),
+          getStudioImage(),
+        ]);
+        const buildMs = Math.round(performance.now() - started);
+        app.log.info(
+          `[news-clip] built in ${buildMs}ms soundbiteLocated=${built.soundbiteLocated}${built.reason ? ` reason=${built.reason}` : ""}`,
+        );
+        // Keep only the soundbite segment; drop the rest of the recording.
+        if (buffer) {
+          if (built.soundbiteLocated && built.cut) buffer.trimToSegment(built.cut.startMs, built.cut.endMs);
+          else buffer.clear();
+        }
+        newsClips.set(sessionId, {
+          status: "ready",
+          wav: built.wav,
+          timeline: built.timeline,
+          soundbiteLocated: built.soundbiteLocated,
+          reason: built.reason,
+          buildMs,
+          studio,
+          still: stills.get(sessionId) ?? still,
+        });
+      } catch (err) {
+        const buildMs = Math.round(performance.now() - started);
+        app.log.error(
+          `[news-clip] build failed after ${buildMs}ms: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        newsClips.set(sessionId, {
+          status: "failed",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  };
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/news-clip", async (request, reply) => {
+    const sessionId = request.params.id;
+    const record = sessions.get(sessionId);
+    if (!record) return reply.code(404).send({ error: "Unknown session." });
+    const news = record.debrief?.news;
+    if (!news) return reply.code(404).send({ error: "This debrief has no news item." });
+    const entry = newsClips.get(sessionId);
+    if (!entry) return reply.code(404).send({ error: "News clip has not started building." });
+    if (entry.status === "pending") return reply.code(202).send({ status: "building" });
+    if (entry.status === "failed") return reply.code(502).send({ error: "News clip could not be built." });
+    return {
+      audioUrl: `/api/sessions/${sessionId}/news-clip/audio`,
+      timeline: entry.timeline,
+      studioImageUrl: entry.studio ? `/api/sessions/${sessionId}/news-clip/studio-image` : null,
+      channel: news.channel,
+      chyron: news.chyron,
+      ticker: news.ticker,
+      ownerStillUrl: entry.still ? `/api/sessions/${sessionId}/news-clip/owner-still` : null,
+      soundbite: news.soundbite,
+      soundbiteLocated: entry.soundbiteLocated,
+      buildMs: entry.buildMs,
+    };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/news-clip/audio", async (request, reply) => {
+    const entry = newsClips.get(request.params.id);
+    if (!entry || entry.status !== "ready") return reply.code(404).send({ error: "News clip audio is not ready." });
+    return reply.type("audio/wav").send(Buffer.from(entry.wav));
+  });
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/news-clip/studio-image", async (request, reply) => {
+    const entry = newsClips.get(request.params.id);
+    if (!entry || entry.status !== "ready" || !entry.studio) {
+      return reply.code(404).send({ error: "Studio image is not ready." });
+    }
+    return reply.type(entry.studio.mimeType).send(Buffer.from(entry.studio.image));
+  });
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/news-clip/owner-still", async (request, reply) => {
+    const entry = newsClips.get(request.params.id);
+    const still = (entry && entry.status === "ready" ? entry.still : null) ?? stills.get(request.params.id) ?? null;
+    if (!still) return reply.code(404).send({ error: "Owner still is not available." });
+    return reply.type(still.mimeType).send(Buffer.from(still.image));
+  });
+
   app.get<{ Params: { id: string } }>("/api/sessions/:id/front-page", async (request, reply) => {
     const sessionId = request.params.id;
     const record = sessions.get(sessionId);
@@ -182,6 +339,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       }
       // One debrief per session: a repeat call returns the stored one.
       if (record.debrief) {
+        startNewsClip(sessionId, record.debrief, record.turns, null);
         const cached: DebriefResponse = { debrief: record.debrief, frontPage: null };
         return cached;
       }
@@ -239,6 +397,8 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       // Start the image as soon as the debrief JSON exists, but return the
       // debrief now: the client fetches the image from the front-page route.
       startFrontPage(sessionId, debrief, scenario, still);
+      // Built in parallel with the front page.
+      startNewsClip(sessionId, debrief, turns, still);
 
       const response: DebriefResponse = { debrief, frontPage: null };
       return response;
