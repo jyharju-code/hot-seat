@@ -74,18 +74,31 @@ async function main(): Promise<void> {
   let speechEndAt: number | null = null;
   let finalText = "";
   let finalAt = 0;
+  const TURN_END_SILENCE_MS = Number(process.env.TURN_END_SILENCE_MS ?? 1500);
   const done = (async () => {
-    for await (const ev of session.events()) {
-      const e: SttEvent = ev;
-      if (e.type === "endpoint" && speechEndAt === null) speechEndAt = performance.now();
+    const iter = session.events()[Symbol.asyncIterator]();
+    const parts: string[] = [];
+    for (;;) {
+      const nextP = iter.next();
+      let result: IteratorResult<SttEvent>;
+      if (parts.length === 0) {
+        result = await nextP;
+      } else {
+        const raced = await Promise.race([nextP, sleep(TURN_END_SILENCE_MS).then(() => "silence" as const)]);
+        if (raced === "silence") break;
+        result = raced;
+      }
+      if (result.done) break;
+      const e: SttEvent = result.value;
+      if (e.type === "endpoint") speechEndAt = performance.now();
       if (e.type === "partial") console.log(`  partial: ${e.text}`);
       if (e.type === "error") throw new Error(e.message);
-      if (e.type === "final") {
-        finalText = e.text;
+      if (e.type === "final" && e.text.trim()) {
+        parts.push(e.text.trim());
         finalAt = performance.now();
-        return;
       }
     }
+    finalText = parts.join(" ");
   })();
 
   const FRAME = 3200; // 100 ms at 16 kHz PCM16
@@ -110,8 +123,10 @@ async function main(): Promise<void> {
   session.close();
   void streamStart;
   const speechEndRef = speechEndAt ?? finalAt;
+  console.log(`timing reference: ${speechEndAt !== null ? "endpoint (speechEnd) event" : "arrival of last final segment (no endpoint event seen)"}`);
   console.log(`transcript: ${JSON.stringify(finalText)}`);
   console.log(`timing speechEnd->final: ${Math.round(finalAt - speechEndRef)}ms`);
+  if (!finalText) throw new Error("Empty transcript from STT; not calling the LLM");
 
   // 3) Real journalist prompt via Muse Spark.
   const brain = new JournalistBrain(new MetaLlm({ apiKey: modelKey }), await loadJournalistPrompts());

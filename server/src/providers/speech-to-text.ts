@@ -143,7 +143,7 @@ class MuseSttSession implements SttSession {
   private readonly queue: SttEvent[] = [];
   private readonly waiters: Array<(v: IteratorResult<SttEvent>) => void> = [];
   private readonly partialCbs: Array<(text: string) => void> = [];
-  private readonly seenUnknown = new Set<string>();
+  private readonly seenTypes = new Set<string>();
   private done = false;
   private ended = false;
 
@@ -249,6 +249,10 @@ class MuseSttSession implements SttSession {
       return;
     }
     const type = typeof msg.type === "string" ? msg.type : "";
+    if (!this.seenTypes.has(type)) {
+      this.seenTypes.add(type);
+      this.log(`[stt] event type: ${type || "(missing)"} ${safePreview(msg)}`);
+    }
     if (type === "error") {
       this.emit({ type: "error", message: String(msg.message ?? "Muse Voice Transcribe error") });
       return;
@@ -276,10 +280,6 @@ class MuseSttSession implements SttSession {
       for (const cb of this.partialCbs) cb(partialText);
       this.emit({ type: "partial", text: partialText });
       return;
-    }
-    if (type && !this.seenUnknown.has(type)) {
-      this.seenUnknown.add(type);
-      this.log(`[stt] unknown event type: ${type} ${safePreview(msg)}`);
     }
   }
 
