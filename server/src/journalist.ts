@@ -91,11 +91,13 @@ export class JournalistBrain {
   private readonly llm: Llm;
   private readonly prompts: JournalistPrompts;
   private readonly model: string;
+  private readonly log: (line: string) => void;
 
-  constructor(llm: Llm, prompts: JournalistPrompts, model = "muse-spark-1.3") {
+  constructor(llm: Llm, prompts: JournalistPrompts, model = "muse-spark-1.3", log?: (line: string) => void) {
     this.llm = llm;
     this.prompts = prompts;
     this.model = model;
+    this.log = log ?? (() => undefined);
   }
 
   /** Generated scenarios carry their opening question: no extra LLM call. */
@@ -121,7 +123,7 @@ export class JournalistBrain {
   ): Promise<ReporterLine> {
     const p = persona(scenario);
     const tail = history
-      .slice(-8)
+      .slice(-6)
       .map((t) => `${t.role === "user" ? "Owner" : t.role === "news" ? "News" : p.name}: ${t.text}`)
       .join("\n");
     const prompt = fillTemplate(this.prompts.journalistTurn, {
@@ -157,6 +159,7 @@ export class JournalistBrain {
         attempt === 0
           ? ""
           : "\n\nYour previous reply was not valid JSON in the required shape. Return ONLY the JSON object, nothing else.";
+      this.log(`[turn] prompt chars=${(prompt + retryNote).length}`);
       let result;
       try {
         result = await this.llm.chat({

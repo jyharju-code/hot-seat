@@ -156,6 +156,26 @@ describe("JournalistBrain", () => {
     expect(llm.lastPrompt).not.toContain("second customer messaged");
   });
 
+  it("passes only the last 6 conversation turns as transcript_tail and logs prompt size", async () => {
+    const llm = new FakeLlm([VALID]);
+    const logs: string[] = [];
+    const prompts: JournalistPrompts = {
+      spokenStyle: "STYLE",
+      journalistTurn: "TAIL<<{transcript_tail}>> {last_answer} {spoken_style} {public_facts} {landmines_known_to_you}",
+      openingQuestion: "O",
+    };
+    const brain = new JournalistBrain(llm, prompts, "muse-spark-1.3", (l) => logs.push(l));
+    const history = Array.from({ length: 10 }, (_, i) => ({
+      role: (i % 2 === 0 ? "reporter" : "user") as "reporter" | "user",
+      text: `turn-${i}`,
+    }));
+    await brain.nextTurn(cafeScenario, history, "last");
+    expect(llm.lastPrompt).toContain("turn-4");
+    expect(llm.lastPrompt).toContain("turn-9");
+    expect(llm.lastPrompt).not.toContain("turn-3");
+    expect(logs.some((l) => l === `[turn] prompt chars=${llm.lastPrompt.length}`)).toBe(true);
+  });
+
   it("throws after the single retry also fails", async () => {
     const llm = new FakeLlm(["nope", "still nope"]);
     const brain = new JournalistBrain(llm, PROMPTS);
