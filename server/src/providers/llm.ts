@@ -8,6 +8,7 @@ export interface LlmChatInput {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  reasoningEffort?: string;
 }
 
 export interface LlmChatResult {

@@ -48,6 +48,7 @@ export class MetaLlm implements Llm {
         messages: input.messages,
         ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
         ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
+        ...(input.reasoningEffort !== undefined ? { reasoning_effort: input.reasoningEffort } : {}),
       }),
     });
     if (!res.ok) throw new Error(`Meta Model API chat failed: ${res.status} ${await safeText(res)}`);
