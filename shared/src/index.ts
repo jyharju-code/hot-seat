@@ -72,6 +72,8 @@ export const reporterLineSchema = z.object({
   flags: z.array(reporterFlagSchema),
   say: z.string().min(1),
   quote_used: z.string().nullable(),
+  /** Semantic end-of-turn judgement for the owner answer this replies to. */
+  owner_done: z.boolean().optional(),
 });
 export type ReporterLine = z.infer<typeof reporterLineSchema>;
 
@@ -100,6 +102,8 @@ export const turnTimingSchema = z.object({
   speechEndToFirstAudioMs: z.number().nonnegative(),
   /** Total ms from speech end to first audio (same origin as the fields above). */
   totalToFirstAudioMs: z.number().nonnegative(),
+  /** True when TTS audio was buffered speculatively before the turn ended. */
+  speculativeTtsUsed: z.boolean().default(false),
 });
 export type TurnTiming = z.infer<typeof turnTimingSchema>;
 

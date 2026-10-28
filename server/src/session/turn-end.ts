@@ -2,7 +2,7 @@
  *  answer that looks unfinished gets a longer silence before the turn ends.
  *  Deterministic and pure so it can be unit tested. */
 
-export const TURN_END_SILENCE_MS = 1500;
+export const TURN_END_SILENCE_MS = 1000;
 export const TURN_END_HESITANT_MS = 3200;
 
 const SINGLE_FILLERS = new Set([
@@ -58,9 +58,20 @@ export interface TurnEndOptions {
   hesitantMs?: number;
 }
 
-/** Silence to wait before ending the turn for this answer so far. */
-export function turnEndSilenceMs(answer: string, opts: TurnEndOptions = {}): number {
+/**
+ * Silence to wait before ending the turn for this answer so far.
+ * `ownerDone` is the speculative journalist's semantic judgement:
+ * true ends at the normal window, false waits the hesitant window,
+ * and null/undefined (not arrived yet) falls back to the word heuristic.
+ */
+export function turnEndSilenceMs(
+  answer: string,
+  opts: TurnEndOptions = {},
+  ownerDone?: boolean | null,
+): number {
   const complete = opts.silenceMs ?? TURN_END_SILENCE_MS;
   const hesitant = opts.hesitantMs ?? TURN_END_HESITANT_MS;
+  if (ownerDone === true) return complete;
+  if (ownerDone === false) return hesitant;
   return isHesitantAnswer(answer) ? hesitant : complete;
 }

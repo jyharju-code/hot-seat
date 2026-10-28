@@ -7,13 +7,31 @@ import {
 } from "../src/session/turn-end.js";
 
 describe("adaptive turn-end silence", () => {
-  it("defaults: 1500 ms complete, 3200 ms hesitant", () => {
-    expect(TURN_END_SILENCE_MS).toBe(1500);
+  it("defaults: 1000 ms complete, 3200 ms hesitant", () => {
+    expect(TURN_END_SILENCE_MS).toBe(1000);
     expect(TURN_END_HESITANT_MS).toBe(3200);
     const complete = "We closed the cafe that morning and told every customer directly.";
     expect(isHesitantAnswer(complete)).toBe(false);
-    expect(turnEndSilenceMs(complete)).toBe(1500);
+    expect(turnEndSilenceMs(complete)).toBe(1000);
     expect(turnEndSilenceMs("well, so the thing is I, let me think.")).toBe(3200);
+  });
+
+  it("owner_done true ends at the normal window even for hesitant wording", () => {
+    expect(turnEndSilenceMs("well, so the thing is I, let me think.", {}, true)).toBe(1000);
+    expect(turnEndSilenceMs("We closed it.", { silenceMs: 100, hesitantMs: 900 }, true)).toBe(100);
+  });
+
+  it("owner_done false waits the hesitant window even for a complete sentence", () => {
+    const complete = "We closed the cafe that morning and told every customer directly.";
+    expect(turnEndSilenceMs(complete, {}, false)).toBe(3200);
+    expect(turnEndSilenceMs(complete, { silenceMs: 100, hesitantMs: 900 }, false)).toBe(900);
+  });
+
+  it("owner_done not arrived falls back to the word heuristic", () => {
+    const complete = "We closed the cafe that morning and told every customer directly.";
+    expect(turnEndSilenceMs(complete, {}, null)).toBe(1000);
+    expect(turnEndSilenceMs(complete, {}, undefined)).toBe(1000);
+    expect(turnEndSilenceMs("well, so the thing is I, let me think.", {}, null)).toBe(3200);
   });
 
   it("under 8 words is hesitant even with a full stop", () => {
