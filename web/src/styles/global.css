@@ -77,6 +77,8 @@ main { padding: 48px 32px; max-width: 1100px; }
 .briefing { margin-bottom:24px; }
 .briefing-list { list-style:disc; padding-left:20px; }
 .briefing-list li { display:list-item; border-top:none; padding:4px 0; }
+.news-flash { background: var(--ground-dark); color: var(--ink); padding: 10px 16px; margin: 0 0 24px; max-width: 900px; }
+.news-flash strong { font-weight: 700; margin-right: 8px; }
 .live-dot { display:inline-block; width:.18em; height:.18em; border-radius:50%; background:var(--live); vertical-align:middle; }
 .clock { font-size:.35em; font-weight:700; }
 .headline-q { font-size:28px; font-weight:700; line-height:1.15; }

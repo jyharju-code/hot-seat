@@ -3,7 +3,7 @@ import type { ReporterLine, ServerMessage, SessionState, TurnTiming } from "@hot
 import { serverMessageSchema, stripAudioTags } from "@hot-seat/shared";
 import { PcmPlayer } from "./audio/pcm-player.js";
 
-interface Entry { role: "user" | "reporter"; text: string; timing?: TurnTiming }
+interface Entry { role: "user" | "reporter" | "news"; text: string; timing?: TurnTiming }
 const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
 export interface CameraStill {
@@ -23,6 +23,7 @@ export function Session({
   const [question, setQuestion] = useState("");
   const [lastAnswer, setLastAnswer] = useState("");
   const [entries, setEntries] = useState<Entry[]>([]);
+  const [newsFlash, setNewsFlash] = useState("");
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
@@ -143,6 +144,10 @@ export function Session({
   }
   function handleMessage(msg: ServerMessage) {
     if (msg.type === "state") setState(msg.state);
+    else if (msg.type === "news_flash") {
+      setNewsFlash(msg.text);
+      setEntries((e) => [...e, { role: "news", text: msg.text }]);
+    }
     else if (msg.type === "transcript") {
       const display = stripAudioTags(msg.text);
       if (msg.role === "user") setLastAnswer(display);
@@ -172,6 +177,7 @@ export function Session({
   const statusText = state === "thinking" ? "Thinking." : state === "speaking" ? "Speaking." : state === "listening" ? "Listening." : "Connecting.";
   return (
     <main>
+      {newsFlash && <p className="news-flash"><strong>NEW</strong> {newsFlash}</p>}
       <h1 className="status-headline">{live ? <>Live. <span className="live-dot" aria-label="live" /></> : "Ready."} <span className="clock">{fmtClock(elapsed)}</span></h1>
       <p className="muted">{live ? statusText : "Starting microphone."}</p>
       {error && <p className="error">{error}</p>}
@@ -181,7 +187,7 @@ export function Session({
       </div>
       <section className="paper transcript" aria-label="Transcript"><h2>Transcript</h2>
         {entries.length === 0 && <p className="muted">Nothing yet.</p>}
-        <ul>{entries.map((e, i) => (<li key={i} className="t-entry"><span><strong>{e.role === "reporter" ? "Reporter: " : "You: "}</strong>{e.text}{e.timing && <span className="timing">{` ${(e.timing.totalToFirstAudioMs / 1000).toFixed(1)} s to voice`}</span>}</span></li>))}</ul>
+        <ul>{entries.map((e, i) => (<li key={i} className="t-entry"><span><strong>{e.role === "reporter" ? "Reporter: " : e.role === "news" ? "News: " : "You: "}</strong>{e.text}{e.timing && <span className="timing">{` ${(e.timing.totalToFirstAudioMs / 1000).toFixed(1)} s to voice`}</span>}</span></li>))}</ul>
       </section>
       <p><button className="primary" type="button" onClick={end}>End</button></p>
     </main>
