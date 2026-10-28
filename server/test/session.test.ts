@@ -232,18 +232,22 @@ describe("SessionOrchestrator (fake adapters)", () => {
       const s = stt.sessions[0]!;
       s.emit({ type: "final", text: "We take this extremely seriously." });
       await vi.advanceTimersByTimeAsync(600);
-      expect(brainCalls).toHaveLength(0);
+      // Speculative turn has already started on the first final.
+      expect(brainCalls).toEqual(["We take this extremely seriously."]);
       s.emit({ type: "final", text: "We pulled the pastries that morning." });
       await vi.advanceTimersByTimeAsync(1499);
-      expect(brainCalls).toHaveLength(0);
+      expect(brainCalls).toEqual([
+        "We take this extremely seriously.",
+        "We take this extremely seriously. We pulled the pastries that morning.",
+      ]);
       await vi.advanceTimersByTimeAsync(1);
-      expect(brainCalls).toEqual(["We take this extremely seriously. We pulled the pastries that morning."]);
+      // The turn speaks only once, with the combined answer; no extra LLM call at window close.
+      expect(brainCalls).toHaveLength(2);
       expect(messages).toContainEqual({
         type: "transcript",
         role: "user",
         text: "We take this extremely seriously. We pulled the pastries that morning.",
       });
-      // Same STT session served the whole turn; a fresh one opened only after speaking.
       expect(stt.sessions.length).toBe(2);
     } finally {
       vi.useRealTimers();
@@ -256,12 +260,16 @@ describe("SessionOrchestrator (fake adapters)", () => {
       const { stt, brainCalls } = await started({ turnEndSilenceMs: 1500 });
       const s = stt.sessions[0]!;
       s.emit({ type: "final", text: "First part." });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(brainCalls).toEqual(["First part."]);
       await vi.advanceTimersByTimeAsync(1000);
       s.emit({ type: "partial", text: "First part. And" });
       await vi.advanceTimersByTimeAsync(1499);
-      expect(brainCalls).toHaveLength(0);
-      await vi.advanceTimersByTimeAsync(1);
+      // Partial aborted the speculative call, and no fresh call until the window closes.
       expect(brainCalls).toEqual(["First part."]);
+      await vi.advanceTimersByTimeAsync(1);
+      // Fresh call at window close with the same (final) answer.
+      expect(brainCalls).toEqual(["First part.", "First part."]);
     } finally {
       vi.useRealTimers();
     }
@@ -308,5 +316,93 @@ describe("SessionOrchestrator (fake adapters)", () => {
     // Listening again on the fresh session: pushes flow there.
     orch.pushAudio(new Uint8Array([3]));
     expect(stt.sessions[stt.sessions.length - 1]!.pushed).toHaveLength(1);
+  });
+});
+
+class CountingAbortLlm implements Llm {
+  calls = 0;
+  aborts = 0;
+  prompts: string[] = [];
+  async chat(input: { messages?: Array<{ content: string }>; signal?: AbortSignal }): Promise<LlmChatResult> {
+    this.calls += 1;
+    const prompt = input.messages?.[0]?.content ?? "";
+    this.prompts.push(prompt);
+    const answer = prompt.startsWith("T ") ? prompt.slice(2, prompt.indexOf(" facts:")) : "?";
+    const text = JSON.stringify({ move: "follow_up", flags: [], say: `Reply to: ${answer}`, quote_used: null });
+    const signal = input.signal;
+    if (!signal) return { text, model: "fake", finishReason: "stop" };
+    return new Promise<LlmChatResult>((resolve, reject) => {
+      const timer = setTimeout(() => resolve({ text, model: "fake", finishReason: "stop" }), 250);
+      signal.addEventListener(
+        "abort",
+        () => {
+          this.aborts += 1;
+          clearTimeout(timer);
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        },
+        { once: true },
+      );
+    });
+  }
+  async generateStructured<T>(): Promise<T> {
+    throw new Error("not used");
+  }
+}
+
+describe("Speculative turn (fake STT + fake LLM counting calls and aborts)", () => {
+  async function startedWithRealBrain() {
+    const stt = new FakeStt();
+    const tts = new FakeTts();
+    const { messages, sink } = makeSink();
+    const llm = new CountingAbortLlm();
+    const brain = new JournalistBrain(llm as never, PROMPTS);
+    const orch = new SessionOrchestrator({
+      stt,
+      brain,
+      tts,
+      sink,
+      scenario: cafeTestScenario,
+      voiceId: "voice-1",
+      turnEndSilenceMs: 100,
+    });
+    await orch.start();
+    llm.calls = 0;
+    llm.aborts = 0;
+    llm.prompts = [];
+    tts.texts = [];
+    return { stt, tts, messages, orch, llm };
+  }
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("starts the LLM on the first final, during the silence window, and reuses its result", async () => {
+    const { stt, tts, orch, llm } = await startedWithRealBrain();
+    stt.sessions[0]!.emit({ type: "final", text: "We fixed it." });
+    await wait(10);
+    expect(llm.calls).toBe(1);
+    expect(orch.currentState).toBe("listening");
+    await wait(400);
+    expect(llm.calls).toBe(1);
+    expect(llm.aborts).toBe(0);
+    expect(tts.texts[0]).toBe("Reply to: We fixed it.");
+    expect(orch.currentState).toBe("listening");
+  });
+
+  it("aborts the speculative call when more speech arrives and never speaks the shorter reply", async () => {
+    const { stt, tts, messages, llm } = await startedWithRealBrain();
+    stt.sessions[0]!.emit({ type: "final", text: "We fixed it." });
+    await wait(10);
+    expect(llm.calls).toBe(1);
+    stt.sessions[0]!.emit({ type: "final", text: "And we paid compensation." });
+    await wait(10);
+    expect(llm.aborts).toBe(1);
+    expect(llm.calls).toBe(2);
+    await wait(500);
+    expect(llm.calls).toBe(2);
+    expect(tts.texts).toContain("Reply to: We fixed it. And we paid compensation.");
+    expect(tts.texts).not.toContain("Reply to: We fixed it.");
+    const reporterTexts = messages.filter((m) => m.type === "transcript" && m.role === "reporter").map((m) => (m.type === "transcript" ? m.text : ""));
+    expect(reporterTexts).not.toContain("Reply to: We fixed it.");
   });
 });

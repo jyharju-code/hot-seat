@@ -39,6 +39,7 @@ export class SessionOrchestrator {
   private speechEndAt: number | null = null;
   private sttLoop: Promise<void> | null = null;
   private startedAt: number | null = null;
+  private speculative: { answer: string; controller: AbortController; promise: Promise<ReporterLine> } | null = null;
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -80,6 +81,7 @@ export class SessionOrchestrator {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.abortSpeculative();
     try {
       this.sttSession?.end();
       this.sttSession?.close();
@@ -142,13 +144,15 @@ export class SessionOrchestrator {
         this.fail(new Error(ev.message));
         return;
       } else if (ev.type === "partial") {
-        // New partial text postpones the silence deadline (loop re-races).
+        // More speech is coming: cancel any speculative reply from a shorter answer.
+        if (parts.length > 0) this.abortSpeculative();
         continue;
       } else if (ev.type === "final") {
         const segment = ev.text.trim();
         if (!segment) continue; // ignore empty/whitespace finals: no turn, no LLM call
         parts.push(segment);
         lastFinalAt = this.now();
+        this.startSpeculative(parts.join(" "));
       }
     }
     if (this.stopped || parts.length === 0) return;
@@ -156,6 +160,27 @@ export class SessionOrchestrator {
     // Timing origin: last endpoint event if seen, else arrival of the last final segment.
     const speechEndAt = lastEndpointAt ?? finalAt;
     await this.handleFinal(parts.join(" "), speechEndAt, finalAt);
+  }
+
+  private elapsedSeconds(): number {
+    return this.startedAt === null ? 0 : Math.max(0, (this.now() - this.startedAt) / 1000);
+  }
+
+  /** Start the journalist LLM at once, during the turn-end silence window. */
+  private startSpeculative(answer: string): void {
+    this.speculative?.controller.abort();
+    const controller = new AbortController();
+    const history: ConversationTurn[] = [...this.history, { role: "user", text: answer }];
+    const promise = Promise.resolve().then(() =>
+      this.deps.brain.nextTurn(this.deps.scenario, history, answer, this.elapsedSeconds(), controller.signal),
+    );
+    promise.catch(() => undefined);
+    this.speculative = { answer, controller, promise };
+  }
+
+  private abortSpeculative(): void {
+    this.speculative?.controller.abort();
+    this.speculative = null;
   }
 
   private async handleFinal(text: string, speechEndAt: number, finalAt: number): Promise<void> {
@@ -173,8 +198,15 @@ export class SessionOrchestrator {
     this.setState("thinking");
     let line: ReporterLine;
     try {
-      const elapsedSeconds = this.startedAt === null ? 0 : Math.max(0, (this.now() - this.startedAt) / 1000);
-      line = await this.deps.brain.nextTurn(this.deps.scenario, [...this.history], userText, elapsedSeconds);
+      // Never speak a reply generated from a shorter answer than the final one.
+      if (this.speculative && this.speculative.answer === userText) {
+        const pending = this.speculative.promise;
+        this.speculative = null;
+        line = await pending;
+      } else {
+        this.abortSpeculative();
+        line = await this.deps.brain.nextTurn(this.deps.scenario, [...this.history], userText, this.elapsedSeconds());
+      }
     } catch (err) {
       this.fail(err);
       await this.beginListening();

@@ -107,6 +107,7 @@ export class JournalistBrain {
     history: ConversationTurn[],
     lastAnswer: string,
     elapsedSeconds = 0,
+    signal?: AbortSignal,
   ): Promise<ReporterLine> {
     const p = persona(scenario);
     const tail = history
@@ -119,7 +120,7 @@ export class JournalistBrain {
       last_answer: lastAnswer,
       spoken_style: this.prompts.spokenStyle,
     });
-    return this.ask(prompt);
+    return this.ask(prompt, signal);
   }
 
   private vars(scenario: BrainScenario, elapsedSeconds: number): Record<string, string> {
@@ -134,19 +135,28 @@ export class JournalistBrain {
     };
   }
 
-  private async ask(prompt: string): Promise<ReporterLine> {
+  private async ask(prompt: string, signal?: AbortSignal): Promise<ReporterLine> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (signal?.aborted) throw abortError();
       const retryNote =
         attempt === 0
           ? ""
           : "\n\nYour previous reply was not valid JSON in the required shape. Return ONLY the JSON object, nothing else.";
-      const result = await this.llm.chat({
-        model: this.model,
-        messages: [{ role: "user", content: prompt + retryNote }],
-        maxTokens: 2000,
-        reasoningEffort: "minimal",
-      });
+      let result;
+      try {
+        result = await this.llm.chat({
+          model: this.model,
+          messages: [{ role: "user", content: prompt + retryNote }],
+          maxTokens: 2000,
+          reasoningEffort: "minimal",
+          ...(signal ? { signal } : {}),
+        });
+      } catch (err) {
+        if (signal?.aborted) throw abortError();
+        throw err;
+      }
+      if (signal?.aborted) throw abortError();
       try {
         return parseReporterLine(result.text);
       } catch (err) {
@@ -157,6 +167,12 @@ export class JournalistBrain {
       `Journalist LLM returned invalid JSON after one retry: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
     );
   }
+}
+
+function abortError(): Error {
+  const err = new Error("The operation was aborted");
+  err.name = "AbortError";
+  return err;
 }
 
 /** Parse tolerantly (code fences, surrounding prose) then validate strictly with zod. */
