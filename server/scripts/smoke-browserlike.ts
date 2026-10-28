@@ -140,13 +140,22 @@ async function main(): Promise<void> {
     console.log(`turn ${turn + 1}: streaming answer (${(pcm.length / 32000).toFixed(1)} s): ${answer}`);
     const FRAME = 3200;
     let stoppedForInterrupt = false;
+    // Pace by absolute clock: frame n is sent at t0 + n * 100 ms. A relative
+    // sleep(100) per frame drifts slower than real time over a long answer.
+    const t0 = performance.now();
+    let frame = 0;
+    const pace = async () => {
+      frame += 1;
+      const wait = t0 + frame * 100 - performance.now();
+      if (wait > 0) await sleep(wait);
+    };
     for (let off = 0; off < pcm.length; off += FRAME) {
       if (isRambleTurn && interrupts > 0) {
         stoppedForInterrupt = true;
         break;
       }
       ws.send(new Uint8Array(pcm.subarray(off, off + FRAME)));
-      await sleep(100);
+      await pace();
     }
     if (stoppedForInterrupt) {
       console.log(`turn ${turn + 1}: interrupt received, stopped streaming the ramble`);
@@ -156,7 +165,7 @@ async function main(): Promise<void> {
       for (let i = 0; i < 20; i++) {
         if (isRambleTurn && interrupts > 0) break;
         ws.send(silence);
-        await sleep(100);
+        await pace();
       }
       if (isRambleTurn && interrupts > 0) console.log(`turn ${turn + 1}: interrupt received during trailing silence`);
     }

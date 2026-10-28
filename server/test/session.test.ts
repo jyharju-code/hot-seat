@@ -778,6 +778,38 @@ describe("Interruptions (brief 07)", () => {
     await h.orch.stop();
   });
 
+  it("reopen at 12 s of a rambling answer: interrupt still fires with full text and elapsed seconds", async () => {
+    const decider = new FakeDecider((input) => (input.seconds >= 12 ? YES : NO));
+    const h = await startedInterrupt(decider);
+    const s = h.session();
+    h.setNow(0); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(9000); s.emit({ type: "partial", text: "We take this very seriously, we take this very seriously" });
+    await ticks();
+    expect(decider.calls).toHaveLength(1);
+    expect(decider.calls[0]!.seconds).toBe(9);
+    // STT dies (ingress too slow) and reopens inside the same answer.
+    s.emit({ type: "error", message: "Ingress audio slower than real-time" });
+    await ticks();
+    expect(h.stt.sessions).toHaveLength(2);
+    expect(h.messages.some((m) => m.type === "error")).toBe(false);
+    // The reopened session only hears new speech; its partial is short.
+    h.setNow(12500);
+    h.session().emit({ type: "partial", text: "and we keep saying it" });
+    await ticks(12);
+    expect(decider.calls.length).toBeGreaterThanOrEqual(2);
+    const last = decider.calls[decider.calls.length - 1]!;
+    expect(last.seconds).toBeGreaterThanOrEqual(12);
+    expect(last.partial).toContain("We take this very seriously, we take this very seriously");
+    expect(last.partial).toContain("and we keep saying it");
+    expect(h.messages).toContainEqual({ type: "interrupt", say: YES.say });
+    expect(h.messages).toContainEqual({
+      type: "transcript",
+      role: "user",
+      text: "We take this very seriously, we take this very seriously and we keep saying it (cut off)",
+    });
+    await h.orch.stop();
+  });
+
   it("interrupt closes STT, plays the cut-in in the reporter voice, and records transcript and debrief event", async () => {
     const decider = new FakeDecider(() => YES);
     const h = await startedInterrupt(decider);

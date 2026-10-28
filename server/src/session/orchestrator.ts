@@ -232,8 +232,13 @@ export class SessionOrchestrator {
     const parts: string[] = [];
     let lastFinalAt: number | null = null;
     let lastEndpointAt: number | null = null;
-    // Interrupt decision state for this one answer.
+    // Interrupt decision state for this one answer. All of this state lives
+    // outside the per-session loop below, so an STT reopen inside one answer
+    // keeps the answer start time and the interrupt bookkeeping.
     let latestPartial = "";
+    // Raw cumulative partial of the current STT segment, not yet a final.
+    // Sealed into `parts` when its session dies (see sessionDead handling).
+    let pendingPartial = "";
     let answerStartedAt: number | null = null;
     let lastDecisionAt: number | null = null;
     let lastDecisionText = "";
@@ -335,6 +340,9 @@ export class SessionOrchestrator {
           const text = ev.text.trim();
           if (text) {
             if (answerStartedAt === null) answerStartedAt = this.now();
+            pendingPartial = text;
+            // Prefix with collected finals / sealed segments, so a partial
+            // from a reopened session continues the full answer text.
             latestPartial = [...parts, text].join(" ");
             maybeDecide(latestPartial);
           }
@@ -344,6 +352,7 @@ export class SessionOrchestrator {
           if (!segment) continue;
           if (answerStartedAt === null) answerStartedAt = this.now();
           parts.push(segment);
+          pendingPartial = "";
           latestPartial = parts.join(" ");
           lastFinalAt = this.now();
           maybeDecide(latestPartial);
@@ -354,6 +363,14 @@ export class SessionOrchestrator {
       if (interruptReq) break;
       if (turnEnded) break;
       if (sessionDead) {
+        // Seal the last partial into the collected answer: the reopened
+        // session only hears new speech, so without this the text (and the
+        // interrupt decision built on it) would restart from zero.
+        if (pendingPartial && parts[parts.length - 1] !== pendingPartial) {
+          parts.push(pendingPartial);
+          latestPartial = parts.join(" ");
+        }
+        pendingPartial = "";
         this.log(`[stt] session ended while listening; reopening (kept ${parts.length} answer segment(s))`);
         this.teardownStt();
         continue;
