@@ -100,6 +100,8 @@ wss.on("connection", (ws: WebSocket) => {
           sendJson({ type: "error", message: err instanceof Error ? err.message : String(err) });
         }
       })();
+    } else if (msg.data.type === "playback_done") {
+      void orchestrator?.playbackDone();
     } else if (msg.data.type === "stop") {
       void orchestrator?.stop();
       orchestrator = null;
