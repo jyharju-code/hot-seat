@@ -10,7 +10,7 @@ import { loadConfig } from "./config.js";
 import { JournalistBrain, loadJournalistPrompts, primaryJournalist } from "./journalist.js";
 import { LlmInterruptDecider } from "./interrupt.js";
 import { loadPrompt } from "./prompts.js";
-import { BasetenLlm, ElevenLabsTextToSpeech, MetaLlm, MuseSpeechToText } from "./providers/index.js";
+import { BASETEN_DEFAULT_MODEL, BasetenLlm, ElevenLabsTextToSpeech, HedgedLlm, MetaLlm, MuseSpeechToText, type HedgedProvider, type Llm } from "./providers/index.js";
 import { requireScenario, ScenarioStore, SCENARIO_EXPIRED_MESSAGE } from "./scenarios/store.js";
 import { SessionOrchestrator } from "./session/orchestrator.js";
 import { SessionStore } from "./session/store.js";
@@ -52,18 +52,35 @@ wss.on("connection", (ws: WebSocket) => {
       const scenario = requireScenario(scenarioStore, scenarioId);
       const journalist = primaryJournalist(scenario);
       const prompts = await loadJournalistPrompts();
-      let llm;
+      let primaryLlm: Llm;
+      let primaryProvider: HedgedProvider;
       let turnModel = config.llmChatModel;
       if (config.turnLlm === "baseten") {
         if (!config.BASETEN_API_KEY) throw new Error("BASETEN_API_KEY is not configured on the server");
-        llm = new BasetenLlm({ apiKey: config.BASETEN_API_KEY });
-        turnModel = "meta-models/muse-spark-open-1026";
+        primaryLlm = new BasetenLlm({ apiKey: config.BASETEN_API_KEY });
+        turnModel = BASETEN_DEFAULT_MODEL;
+        primaryProvider = { name: "baseten", llm: primaryLlm, model: turnModel };
       } else {
-        llm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel });
+        primaryLlm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel });
+        primaryProvider = { name: "meta", llm: primaryLlm, model: turnModel };
       }
+      // Hedge turn calls on the other provider only when both keys exist.
+      let hedgeProvider: HedgedProvider | null = null;
+      if (config.MODEL_API_KEY && config.BASETEN_API_KEY) {
+        hedgeProvider =
+          primaryProvider.name === "meta"
+            ? { name: "baseten", llm: new BasetenLlm({ apiKey: config.BASETEN_API_KEY }), model: BASETEN_DEFAULT_MODEL }
+            : { name: "meta", llm: new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel }), model: config.llmChatModel };
+      }
+      const llm: Llm = new HedgedLlm({
+        primary: primaryProvider,
+        hedge: hedgeProvider,
+        hedgeAfterMs: config.hedgeAfterMs,
+        log: (line) => app.log.info(line),
+      });
       const record = sessionStore.startSession(scenario, Date.now(), scenarioId);
-      const brain = new JournalistBrain(llm, prompts, turnModel);
-      const interruptDecider = new LlmInterruptDecider(llm, await loadPrompt("interrupt-decision.md"), turnModel);
+      const brain = new JournalistBrain(llm, prompts, turnModel, (line) => app.log.info(line));
+      const interruptDecider = new LlmInterruptDecider(primaryLlm, await loadPrompt("interrupt-decision.md"), turnModel);
       const voice = voiceFor(journalist.temperament, journalist.voice);
       const orchestrator = new SessionOrchestrator({
         stt: new MuseSpeechToText({

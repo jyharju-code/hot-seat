@@ -1,6 +1,7 @@
 export type { Llm, LlmChatInput, LlmChatResult, LlmMessage, LlmStructuredInput } from "./llm.js";
 export { MetaLlm, type MetaLlmOptions } from "./meta-llm.js";
 export { BasetenLlm, BASETEN_DEFAULT_MODEL, type BasetenLlmOptions } from "./baseten-llm.js";
+export { HedgedLlm, HEDGE_AFTER_MS, type HedgedLlmOptions, type HedgedProvider, type HedgeProviderName } from "./hedged-llm.js";
 export {
   MuseSpeechToText,
   StubSpeechToText,
