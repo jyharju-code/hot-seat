@@ -22,7 +22,7 @@ const envSchema = z.object({
   TURN_END_SILENCE_MS: z.coerce.number().int().positive().max(60_000).default(1000),
   TURN_END_HESITANT_MS: z.coerce.number().int().positive().max(60_000).default(3200),
   LISTEN_IDLE_MS: z.coerce.number().int().positive().max(3_600_000).default(60_000),
-  MAX_SESSION_MS: z.coerce.number().int().positive().max(3_600_000).default(600_000),
+  MAX_SESSION_MS: z.coerce.number().int().positive().max(3_600_000).default(720_000),
   INTERRUPTS: z.enum(["on", "off"]).default("on"),
 });
 

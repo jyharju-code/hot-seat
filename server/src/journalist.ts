@@ -1,4 +1,4 @@
-import { reporterLineSchema, revealedLandmines, type Escalation, type GeneratedScenario, type ReporterLine } from "@hot-seat/shared";
+import { isProfileScenario, reporterLineSchema, revealedLandmines, sessionDurationSeconds, type Escalation, type GeneratedScenario, type ReporterLine } from "@hot-seat/shared";
 import type { Llm } from "./providers/llm.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
 import type { DemoScenario } from "./scenarios/cafe.js";
@@ -7,15 +7,21 @@ export interface JournalistPrompts {
   spokenStyle: string;
   journalistTurn: string;
   openingQuestion: string;
+  profileTurn?: string;
 }
 
 export async function loadJournalistPrompts(): Promise<JournalistPrompts> {
-  const [spokenStyle, journalistTurn, openingQuestion] = await Promise.all([
+  const [spokenStyle, journalistTurn, openingQuestion, profileTurn] = await Promise.all([
     loadPrompt("spoken-style.md"),
     loadPrompt("journalist-turn.md"),
     loadPrompt("opening-question.md"),
+    loadPrompt("profile-journalist-turn.md"),
   ]);
-  return { spokenStyle: spokenStyle.trim(), journalistTurn, openingQuestion };
+  return { spokenStyle: spokenStyle.trim(), journalistTurn, openingQuestion, profileTurn };
+}
+
+export function isProfileBrainScenario(scenario: BrainScenario): boolean {
+  return isGenerated(scenario) && isProfileScenario(scenario);
 }
 
 export interface ConversationTurn {
@@ -78,6 +84,7 @@ function landminesText(
   learnedEscalations: readonly Escalation[] = [],
 ): string {
   if (!isGenerated(scenario)) return "None yet.";
+  if (isProfileScenario(scenario)) return "None yet.";
   const known = revealedLandmines(scenario, journalistId, elapsedSeconds).map((m) => m.fact);
   const fromEscalations = learnedEscalations
     .filter((e) => e.gives_journalist === journalistId)
@@ -133,8 +140,12 @@ export class JournalistBrain {
       .map((t) => `${t.role === "user" ? "Owner" : t.role === "news" ? "News" : p.name}: ${t.text}`)
       .join("\n");
     const recent = history.filter((t) => t.role === "reporter").slice(-3).map((t) => t.text);
-    const prompt = fillTemplate(this.prompts.journalistTurn, {
+    const profile = isProfileBrainScenario(scenario);
+    const template = profile ? (this.prompts.profileTurn ?? this.prompts.journalistTurn) : this.prompts.journalistTurn;
+    const prompt = fillTemplate(template, {
       ...this.vars(scenario, elapsedSeconds, learnedEscalations),
+      elapsed_seconds: String(Math.round(elapsedSeconds)),
+      duration_seconds: String(profile && isGenerated(scenario) ? sessionDurationSeconds(scenario) : 0),
       transcript_tail: tail || "(nothing yet)",
       your_recent_lines: recent.length > 0 ? recent.join("\n") : "(none yet)",
       last_answer: lastAnswer,

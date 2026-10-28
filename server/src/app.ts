@@ -11,7 +11,7 @@ import { DebriefCoach, generateFrontPage, type DebriefGenerator } from "./debrie
 import { MetaImageGen, type ImageGen } from "./providers/image-gen.js";
 import { MetaLlm } from "./providers/meta-llm.js";
 import { CrisisDirector, type ScenarioGenerator } from "./scenarios/director.js";
-import { presets } from "./scenarios/presets.js";
+import { presets, profilePresets } from "./scenarios/presets.js";
 import { ScenarioStore } from "./scenarios/store.js";
 import { SessionStore } from "./session/store.js";
 
@@ -32,14 +32,14 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
 
   const generate: ScenarioGenerator =
     deps.generateScenario ??
-    (async (description, language) => {
+    (async (description, language, options) => {
       if (!config.MODEL_API_KEY) throw new Error("MODEL_API_KEY is not configured on the server");
       const director = new CrisisDirector(
         new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: config.scenarioModel }),
         config.scenarioModel,
         config.scenarioReasoning,
       );
-      return director.generate(description, language);
+      return director.generate(description, language, options);
     });
 
   app.get("/api/health", async (): Promise<HealthResponse> => ({
@@ -52,10 +52,10 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     providers: providerStatuses(config),
   }));
 
-  app.get("/api/presets", async () => ({ presets }));
+  app.get("/api/presets", async () => ({ presets, profilePresets }));
 
   app.post<{ Body: unknown }>("/api/scenarios", async (request, reply) => {
-    const body = (request.body ?? {}) as { description?: unknown; language?: unknown };
+    const body = (request.body ?? {}) as { description?: unknown; language?: unknown; mode?: unknown; duration_minutes?: unknown; durationMinutes?: unknown };
     const description = typeof body.description === "string" ? body.description.trim() : "";
     if (description.length < 10 || description.length > 600) {
       return reply.code(400).send({ error: "Description must be between 10 and 600 characters." });
@@ -64,9 +64,19 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     if (language !== "en") {
       return reply.code(400).send({ error: 'Only language "en" is supported.' });
     }
+    const modeRaw = body.mode === undefined ? "hot_seat" : body.mode;
+    if (modeRaw !== "hot_seat" && modeRaw !== "profile") {
+      return reply.code(400).send({ error: 'Mode must be "hot_seat" or "profile".' });
+    }
+    const durationRaw = body.duration_minutes ?? body.durationMinutes ?? 5;
+    if (durationRaw !== 5 && durationRaw !== 10) {
+      return reply.code(400).send({ error: "Duration must be 5 or 10 minutes." });
+    }
+    const mode = modeRaw as "hot_seat" | "profile";
+    const durationMinutes = durationRaw as 5 | 10;
     const started = performance.now();
     try {
-      const scenario = await generate(description, language);
+      const scenario = await generate(description, language, { mode, durationMinutes });
       const ms = Math.round(performance.now() - started);
       app.log.info(`[scenario] generated in ${ms}ms`);
       const id = store.add(scenario);

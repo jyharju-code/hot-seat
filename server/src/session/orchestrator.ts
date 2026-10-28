@@ -1,4 +1,4 @@
-import { CONNECTION_HICCUP_MESSAGE, stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
+import { CONNECTION_HICCUP_MESSAGE, isProfileScenario, isSessionComplete, sessionDurationSeconds, stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
 import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
 import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
@@ -97,7 +97,8 @@ export const STT_SILENCE_FRAME_BYTES = 3200;
 export const STT_MAX_CONSECUTIVE_OPEN_FAILURES = 3;
 export const STT_RECONNECT_BACKOFF_MS: readonly number[] = [250, 500, 1000];
 export const LISTEN_IDLE_MS = 60_000;
-export const MAX_SESSION_MS = 600_000;
+export const MAX_SESSION_MS = 720_000;
+export const PROFILE_COMPLETE_MESSAGE = "Thank you so much, that was a pleasure. That is everything I need for the feature.";
 export const IDLE_ENDED_MESSAGE = "Session ended after a minute of silence.";
 export const MAX_ENDED_MESSAGE = "Session ended after reaching the maximum session length.";
 export const INTERRUPT_AFTER_MS = 8000;
@@ -166,6 +167,8 @@ export class SessionOrchestrator {
   private abortController = new AbortController();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
+  private profileTimer: ReturnType<typeof setTimeout> | null = null;
+  private profileCompleted = false;
   private sttFailures = 0;
   private lastSttError = "STT session closed";
 
@@ -232,6 +235,49 @@ export class SessionOrchestrator {
     this.clearIdleTimer();
     if (this.maxTimer) clearTimeout(this.maxTimer);
     this.maxTimer = null;
+    if (this.profileTimer) clearTimeout(this.profileTimer);
+    this.profileTimer = null;
+  }
+
+  private get isProfile(): boolean {
+    return isGenerated(this.deps.scenario) && isProfileScenario(this.deps.scenario);
+  }
+
+  private get profileDurationSeconds(): number {
+    return isGenerated(this.deps.scenario) ? sessionDurationSeconds(this.deps.scenario) : 0;
+  }
+
+  private armProfileTimer(): void {
+    if (!this.isProfile || this.profileCompleted) return;
+    if (this.profileTimer) clearTimeout(this.profileTimer);
+    const ms = this.profileDurationSeconds * 1000;
+    if (ms <= 0) return;
+    this.profileTimer = setTimeout(() => {
+      this.profileTimer = null;
+      if (this.stopped || this.profileCompleted) return;
+      this.completeProfileSession();
+    }, ms);
+    (this.profileTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** Profile time is up: thank warmly via session_complete and end by itself. */
+  private completeProfileSession(): void {
+    if (this.profileCompleted || this.stopped) return;
+    this.profileCompleted = true;
+    try {
+      this.deps.sink.send({ type: "session_complete", message: PROFILE_COMPLETE_MESSAGE });
+    } catch { /* client gone */ }
+    try {
+      this.deps.onSessionEnded?.();
+    } catch { /* best effort */ }
+    void this.stop();
+  }
+
+  private maybeCompleteProfile(): boolean {
+    if (!this.isProfile || this.profileCompleted) return false;
+    if (!isSessionComplete(this.elapsedSeconds(), this.profileDurationSeconds)) return false;
+    this.completeProfileSession();
+    return true;
   }
 
   /** Speech was heard: the idle clock and the STT failure counter restart. */
@@ -262,6 +308,7 @@ export class SessionOrchestrator {
     const t0 = this.now();
     this.startedAt = t0;
     this.armMaxTimer();
+    this.armProfileTimer();
     this.setState("thinking");
     try {
       let line: ReporterLine;
@@ -474,6 +521,7 @@ export class SessionOrchestrator {
     let listeningActive = true;
     let interruptReq: { text: string; say: string; reason: string; decisionAt: number; latencyMs: number } | null = null;
     const maybeDecide = (currentText: string): void => {
+      if (this.isProfile) return;
       const decider = this.deps.interruptDecider;
       if (!decider || !(this.deps.interruptsEnabled ?? true) || this.lastAnswerInterrupted) return;
       if (this.stopped || interruptReq || decisionInFlight || answerStartedAt === null) return;
@@ -785,6 +833,7 @@ export class SessionOrchestrator {
 
   /** Earliest unfired escalation whose (scaled) time has passed, if any. */
   private takeDueEscalation(): Escalation | null {
+    if (this.isProfile) return null;
     const scenario = this.deps.scenario;
     if (!("escalations" in scenario)) return null;
     const scale = this.deps.escalationScale ?? 1;
@@ -1017,6 +1066,7 @@ export class SessionOrchestrator {
       text: stripAudioTags(line.say),
       elapsedSeconds: this.elapsedSeconds(),
       flags: [...line.flags],
+      ...(this.isProfile ? { quoteHarvest: line.quote_harvest ?? null, angle: line.angle ?? null } : {}),
     });
     this.history.push({ role: "reporter", text: line.say });
     let timing: TurnTiming;
@@ -1034,6 +1084,7 @@ export class SessionOrchestrator {
         `speechEnd->llm ${Math.round(timing.speechEndToLlmMs)}ms ` +
         `speechEnd->firstAudio ${Math.round(timing.speechEndToFirstAudioMs)}ms totalToVoice ${Math.round(timing.totalToFirstAudioMs)}ms speculativeTtsUsed=${timing.speculativeTtsUsed} partialStartUsed=${timing.partialStartUsed} raceWinner=${timing.raceWinner ?? "none"}`,
     );
+    if (this.maybeCompleteProfile()) return;
     // Wait for playback_done before opening the next STT session.
     if (!this.stopped) this.awaitingPlayback = true;
   }
@@ -1048,7 +1099,10 @@ export class SessionOrchestrator {
     partialStartUsed = false,
     raceWinner: "meta" | "baseten" | null = null,
   ): Promise<TurnTiming> {
-    this.deps.sink.send({ type: "reporter_line", line });
+    const displayLine: ReporterLine = { ...line };
+    delete displayLine.quote_harvest;
+    delete displayLine.angle;
+    this.deps.sink.send({ type: "reporter_line", line: displayLine });
     this.deps.sink.send({ type: "transcript", role: "reporter", text: stripAudioTags(line.say) });
     this.setState("speaking");
     let firstAudioAt: number | null = null;

@@ -1,12 +1,15 @@
 import {
   debriefSchema,
+  isProfileScenario,
   type Debrief,
   type GeneratedScenario,
 } from "@hot-seat/shared";
 import { MIN_REASONING_MAX_TOKENS, type Llm } from "./providers/llm.js";
 import type { ImageGen, ImageResult } from "./providers/image-gen.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
-import { formatEvents, formatTranscript, type TimedTurn } from "./session/store.js";
+import { formatEvents, formatHarvestedQuotes, formatTranscript, harvestedQuotes, type TimedTurn } from "./session/store.js";
+
+export { harvestedQuotes };
 
 export interface DebriefLandmineInput {
   id: string;
@@ -27,12 +30,13 @@ export function debriefLandmineInputs(
   scenario: GeneratedScenario,
   elapsedSeconds: number,
 ): DebriefLandmineInput[] {
+  const profile = isProfileScenario(scenario);
   return scenario.landmines.map((m) => ({
     id: m.id,
     fact: m.fact,
     owner_knows: m.owner_knows,
     reveal_after_seconds: m.reveal_after_seconds,
-    revealed_to_reporter: m.reveal_after_seconds <= elapsedSeconds,
+    revealed_to_reporter: profile ? false : m.reveal_after_seconds <= elapsedSeconds,
   }));
 }
 
@@ -66,11 +70,13 @@ export class DebriefCoach {
     const elapsed = sessionLengthSeconds(turns);
     const prompt = fillTemplate(template, {
       coach_knowledge: coachKnowledge,
+      mode: isProfileScenario(scenario) ? "profile" : "hot_seat",
       scenario_json: JSON.stringify(scenario),
       session_length_seconds: String(elapsed),
       landmine_context: JSON.stringify(debriefLandmineInputs(scenario, elapsed)),
       transcript: formatTranscript(turns),
       events: formatEvents(turns),
+      harvested_quotes: formatHarvestedQuotes(turns),
       language,
     });
     this.log(`[debrief] prompt chars=${prompt.length}`);
@@ -101,8 +107,10 @@ export async function buildFrontPagePrompt(
   tomorrow = tomorrowDateString(),
 ): Promise<string> {
   const template = await loadPrompt("front-page.md");
-  const paperStyle =
-    scenario.format === "press_conference"
+  const profile = isProfileScenario(scenario);
+  const paperStyle = profile
+    ? "a friendly local newspaper feature page, warm and smiling in layout"
+    : scenario.format === "press_conference"
       ? "a serious national broadsheet newspaper"
       : "a local newspaper";
   const paperName = scenario.journalists[0]?.outlet ?? "The Local Courier";
@@ -122,6 +130,9 @@ export async function buildFrontPagePrompt(
     key_facts: scenario.public_facts.slice(0, 5).join("; "),
     quotes,
   });
+  if (profile) {
+    prompt += `\nThis is a friendly feature page, not a crisis page: warm layout, the owner smiling in the large lead photo, anniversary warmth in the design. Let the headline and pull quote, built from the owner's most damaging harvested quote above, sit in sharp contrast to that warmth.`;
+  }
   if (!hasPhoto) {
     // No camera still: describe the lead photo instead of referencing one.
     prompt = prompt
@@ -131,7 +142,9 @@ export async function buildFrontPagePrompt(
       )
       .replace(
         "Use this exact photo as the large lead image, styled as press photography.",
-        `Use as the large lead image a press photograph of the storefront of ${scenario.company.name}, with reporters and microphones outside, people seen from behind, styled as press photography.`,
+        profile
+          ? `Use as the large lead image a warm press photograph of the smiling owner outside ${scenario.company.name}, styled as friendly feature photography.`
+          : `Use as the large lead image a press photograph of the storefront of ${scenario.company.name}, with reporters and microphones outside, people seen from behind, styled as press photography.`,
       );
   }
   return prompt;

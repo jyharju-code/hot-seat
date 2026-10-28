@@ -14,7 +14,7 @@ loadDotenv({ path: path.resolve(here, "../../../.env") });
 loadDotenv();
 
 import { ElevenLabsTextToSpeech, MetaLlm } from "../../src/providers/index.js";
-import { presets } from "../../src/scenarios/presets.js";
+import { presets, profilePresets } from "../../src/scenarios/presets.js";
 import { OwnerAgent } from "./owner.js";
 import { SimSession, type SessionResult } from "./client.js";
 import { buildReport, summarize, summaryTable } from "./report.js";
@@ -22,6 +22,8 @@ import { OWNER_VOICES, type OwnerVoiceGender } from "./voice.js";
 
 /** Rough upfront estimate per owner answer, for the cost guard. */
 export const ESTIMATED_CHARS_PER_TURN = 600;
+/** A friendly profile invites longer answers: estimate more TTS per turn. */
+export const ESTIMATED_CHARS_PER_PROFILE_TURN = 900;
 export const DEFAULT_MAX_CHARS = 20_000;
 
 export interface SimArgs {
@@ -32,6 +34,8 @@ export interface SimArgs {
   preset: string;
   debrief: boolean;
   maxChars: number;
+  mode: "hot_seat" | "profile";
+  duration: 5 | 10;
 }
 
 export function parseArgs(argv: readonly string[]): SimArgs {
@@ -43,6 +47,8 @@ export function parseArgs(argv: readonly string[]): SimArgs {
     preset: "cafe_food",
     debrief: false,
     maxChars: DEFAULT_MAX_CHARS,
+    mode: "hot_seat",
+    duration: 5,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -58,6 +64,15 @@ export function parseArgs(argv: readonly string[]): SimArgs {
     else if (arg === "--preset") args.preset = value();
     else if (arg === "--max-chars") args.maxChars = positiveInt(arg, value());
     else if (arg === "--debrief") args.debrief = true;
+    else if (arg === "--mode") {
+      const v = value();
+      if (v !== "hot_seat" && v !== "profile") throw new Error(`--mode must be hot_seat or profile, got ${v}`);
+      args.mode = v;
+    } else if (arg === "--duration") {
+      const n = positiveInt(arg, value());
+      if (n !== 5 && n !== 10) throw new Error(`--duration must be 5 or 10, got ${n}`);
+      args.duration = n;
+    }
     else throw new Error(`unknown argument: ${arg}`);
   }
   return args;
@@ -70,7 +85,13 @@ function positiveInt(flag: string, raw: string): number {
 }
 
 /** Cost guard: estimate TTS characters before any session starts. */
-export function estimateTotalChars(profileCount: number, turns: number): number {
+export function estimateTotalChars(profileCount: number, turns: number, mode: "hot_seat" | "profile" = "hot_seat", durationMinutes = 5): number {
+  if (mode === "profile") {
+    // A timed profile keeps talking until its minutes run out: expect at
+    // least one answer per 30 seconds, each longer than a crisis answer.
+    const expectedTurns = Math.max(turns, durationMinutes * 2);
+    return profileCount * expectedTurns * ESTIMATED_CHARS_PER_PROFILE_TURN;
+  }
   return profileCount * turns * ESTIMATED_CHARS_PER_TURN;
 }
 
@@ -103,12 +124,16 @@ async function main(): Promise<void> {
   if (!elevenKey) throw new Error("ELEVENLABS_API_KEY is not set in .env");
 
   const profiles = await loadProfiles(args.profiles);
-  const preset = presets.find((p) => p.id === args.preset);
-  if (!preset) throw new Error(`unknown preset ${args.preset} (have: ${presets.map((p) => p.id).join(", ")})`);
+  const allPresets = [...presets, ...profilePresets];
+  const preset = args.mode === "profile" && args.preset === "cafe_food"
+    ? profilePresets[0]!
+    : allPresets.find((p) => p.id === args.preset);
+  if (!preset) throw new Error(`unknown preset ${args.preset} (have: ${allPresets.map((p) => p.id).join(", ")})`);
 
-  const estimated = estimateTotalChars(profiles.length, args.turns);
+  const estimated = estimateTotalChars(profiles.length, args.turns, args.mode, args.duration);
+  const perTurn = args.mode === "profile" ? ESTIMATED_CHARS_PER_PROFILE_TURN : ESTIMATED_CHARS_PER_TURN;
   console.log(
-    `TTS estimate: ${profiles.length} profiles x ${args.turns} turns x ~${ESTIMATED_CHARS_PER_TURN} chars = ${estimated} chars (cap ${args.maxChars})`,
+    `TTS estimate: ${profiles.length} profiles x ${args.turns} turns x ~${perTurn} chars = ${estimated} chars (cap ${args.maxChars}) mode=${args.mode} duration=${args.duration}`,
   );
   if (estimated > args.maxChars) {
     throw new Error(`estimate ${estimated} chars exceeds --max-chars ${args.maxChars}; raise the cap to run`);
@@ -141,6 +166,8 @@ async function main(): Promise<void> {
         profileName: profile.name,
         profileText: profile.text,
         turns: args.turns,
+        mode: args.mode,
+        durationMinutes: args.duration,
         owner,
         tts,
         voiceId: voice.voiceId,

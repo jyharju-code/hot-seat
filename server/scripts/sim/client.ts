@@ -87,6 +87,8 @@ export interface SimSessionOptions {
   profileName: string;
   profileText: string;
   turns: number;
+  mode?: "hot_seat" | "profile";
+  durationMinutes?: 5 | 10;
   owner: OwnerAgent;
   tts: TextToSpeech;
   voiceId: string;
@@ -192,7 +194,7 @@ export class SimSession {
     const res = await fetch(`${this.opts.httpBase}/api/scenarios`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ description: this.opts.presetDescription, language: "en" }),
+      body: JSON.stringify({ description: this.opts.presetDescription, language: "en", mode: this.opts.mode ?? "hot_seat", duration_minutes: this.opts.durationMinutes ?? 5 }),
     });
     if (!res.ok) throw new Error(`scenario creation failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
     return (await res.json()) as { id: string; scenario: GeneratedScenario };
@@ -221,6 +223,7 @@ export class SimSession {
       else if (msg.type === "audio_end") this.state.reporterQueue.noteAudioEnd();
       else if (msg.type === "interrupt") this.state.interrupted = true;
       else if (msg.type === "ended") this.state.ended = true;
+      else if (msg.type === "session_complete") this.state.ended = true;
       else if (msg.type === "error") {
         this.state.errorCount += 1;
         this.log(`server error: ${msg.message}`);

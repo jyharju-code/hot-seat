@@ -94,7 +94,7 @@ wss.on("connection", (ws: WebSocket) => {
         scenario,
         record,
         interruptDecider,
-        interruptsEnabled: config.interruptsEnabled,
+        interruptsEnabled: scenario.format === "profile" ? false : config.interruptsEnabled,
         ...(escalationScale !== undefined ? { escalationScale } : {}),
         voiceId: voice.voiceId,
         partialStableMs: config.partialStableMs,

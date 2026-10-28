@@ -20,6 +20,10 @@ export interface TimedTurn {
   flags: ReporterFlag[];
   /** Set on a cut-off owner turn: why the reporter interrupted. */
   interruptReason?: string;
+  /** Profile reporter turn only, hidden from UI: harvested quote from the owner's previous answer. */
+  quoteHarvest?: string | null;
+  /** Profile reporter turn only, hidden from UI: angle the reporter is building. */
+  angle?: string | null;
 }
 
 export const timedTurnSchema = z.object({
@@ -28,6 +32,8 @@ export const timedTurnSchema = z.object({
   elapsedSeconds: z.number().nonnegative(),
   flags: z.array(reporterFlagSchema),
   interruptReason: z.string().optional(),
+  quoteHarvest: z.string().nullable().optional(),
+  angle: z.string().nullable().optional(),
 });
 
 export interface SessionRecord {
@@ -144,6 +150,19 @@ export function formatTranscript(turns: readonly TimedTurn[]): string {
       (t) =>
         `[${formatMmSs(t.elapsedSeconds)}] ${t.role === "reporter" ? "Reporter" : t.role === "news" ? "News" : "Owner"}: ${t.text}`,
     )
+    .join("\n");
+}
+
+/** Harvested quotes collected by the profile reporter, for the debrief prompt. */
+export function harvestedQuotes(turns: readonly TimedTurn[]): string[] {
+  return turns.flatMap((t) => (t.quoteHarvest ? [t.quoteHarvest] : []));
+}
+
+export function formatHarvestedQuotes(turns: readonly TimedTurn[]): string {
+  const quotes = harvestedQuotes(turns);
+  if (quotes.length === 0) return "(none harvested)";
+  return turns
+    .flatMap((t) => (t.quoteHarvest ? [`[${formatMmSs(t.elapsedSeconds)}] "${t.quoteHarvest}"${t.angle ? ` (angle: ${t.angle})` : ""}`] : []))
     .join("\n");
 }
 
