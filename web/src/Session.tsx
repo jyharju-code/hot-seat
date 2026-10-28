@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReporterLine, ServerMessage, SessionState, TurnTiming } from "@hot-seat/shared";
 import { serverMessageSchema, stripAudioTags } from "@hot-seat/shared";
+import { PcmPlayer } from "./audio/pcm-player.js";
 
 interface Entry { role: "user" | "reporter"; text: string; timing?: TurnTiming }
 const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -17,7 +18,7 @@ export function Session({ onEnd }: { onEnd: () => void }) {
   const stateRef = useRef<SessionState | null>(null);
   const playingRef = useRef(false);
   const playCtxRef = useRef<AudioContext | null>(null);
-  const nextTimeRef = useRef(0);
+  const playerRef = useRef<PcmPlayer | null>(null);
   const endTimerRef = useRef<number | undefined>(undefined);
   const cleanupRef = useRef<(() => void) | null>(null);
 
@@ -45,6 +46,7 @@ export function Session({ onEnd }: { onEnd: () => void }) {
         source.connect(node);
         const playCtx = new AudioContext({ sampleRate: 24000 });
         playCtxRef.current = playCtx;
+        playerRef.current = new PcmPlayer(playCtx);
         locals.push(() => void playCtx.close().catch(() => undefined));
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         const ws = new WebSocket(`${proto}//${location.host}/ws`);
@@ -70,15 +72,9 @@ export function Session({ onEnd }: { onEnd: () => void }) {
   }, []);
 
   function playPcm(data: ArrayBuffer) {
-    const ctx = playCtxRef.current; if (!ctx) return;
+    if (!playerRef.current) return;
     playingRef.current = true;
-    const pcm = new Int16Array(data);
-    const buf = ctx.createBuffer(1, pcm.length, 24000);
-    const ch = buf.getChannelData(0);
-    for (let i = 0; i < pcm.length; i++) ch[i] = (pcm[i] ?? 0) / 32768;
-    const src = ctx.createBufferSource(); src.buffer = buf; src.connect(ctx.destination);
-    const start = Math.max(nextTimeRef.current, ctx.currentTime);
-    src.start(start); nextTimeRef.current = start + buf.duration;
+    playerRef.current.push(data);
   }
   function handleMessage(msg: ServerMessage) {
     if (msg.type === "state") setState(msg.state);
@@ -87,12 +83,12 @@ export function Session({ onEnd }: { onEnd: () => void }) {
       if (msg.role === "user") setLastAnswer(display);
       setEntries((e) => [...e, { role: msg.role, text: display }]);
     } else if (msg.type === "reporter_line") {
+      playerRef.current?.beginLine();
       const line: ReporterLine = msg.line; setQuestion(stripAudioTags(line.say));
     } else if (msg.type === "audio_end") {
-      const ctx = playCtxRef.current;
-      const wait = ctx ? Math.max(0, (nextTimeRef.current - ctx.currentTime) * 1000) : 0;
+      const wait = playerRef.current ? playerRef.current.millisecondsUntilEnd() : 0;
       window.clearTimeout(endTimerRef.current);
-      endTimerRef.current = window.setTimeout(() => { playingRef.current = false; nextTimeRef.current = 0; }, wait + 50);
+      endTimerRef.current = window.setTimeout(() => { playingRef.current = false; playerRef.current?.reset(); }, wait + 50);
     } else if (msg.type === "timing") {
       setEntries((e) => { const c = [...e]; for (let i = c.length - 1; i >= 0; i--) { if (c[i]?.role === "reporter") { c[i] = { ...c[i]!, timing: msg.timing }; break; } } return c; });
     } else if (msg.type === "error") setError(msg.message);
