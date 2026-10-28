@@ -103,13 +103,18 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     "/api/sessions/:id/debrief",
     { bodyLimit: MAX_STILL_BYTES * 2 },
     async (request, reply) => {
-      const id = request.params.id;
-      const record = sessions.get(id);
-      const scenario = record?.scenario ?? store.get(id);
-      if (!scenario) {
+      const sessionId = request.params.id;
+      const record = sessions.get(sessionId);
+      if (!record) {
         return reply.code(404).send({ error: "Unknown session." });
       }
-      const turns = record?.turns ?? [];
+      // One debrief per session: a repeat call returns the stored one.
+      if (record.debrief) {
+        const cached: DebriefResponse = { debrief: record.debrief, frontPage: null };
+        return cached;
+      }
+      const scenario = record.scenario;
+      const turns = record.turns;
       const body = (request.body ?? {}) as {
         stillBase64?: unknown;
         stillMime?: unknown;

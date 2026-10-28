@@ -4,6 +4,8 @@ export interface TextToSpeechOptions {
   voiceId?: string;
   model?: string;
   outputFormat?: "pcm_24000" | "pcm_16000";
+  /** Aborts the fetch / stream when the session stops. */
+  signal?: AbortSignal;
 }
 
 /** Streaming text to speech. First adapter: ElevenLabs eleven_v4. */
@@ -76,6 +78,7 @@ export class ElevenLabsTextToSpeech implements TextToSpeech {
       `${this.baseUrl}/text-to-speech/${voiceId}/stream?output_format=${format}`,
       {
         method: "POST",
+        ...(options?.signal ? { signal: options.signal } : {}),
         headers: { "content-type": "application/json", "xi-api-key": this.apiKey },
         body: JSON.stringify({
           text,
@@ -89,10 +92,19 @@ export class ElevenLabsTextToSpeech implements TextToSpeech {
     const reader = res.body.getReader();
     const raw: AsyncIterable<Uint8Array> = {
       [Symbol.asyncIterator]: async function* () {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value && value.length) yield value;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value && value.length) yield value;
+          }
+        } finally {
+          // Consumer stopped early (or the stream ended): release the socket.
+          try {
+            await reader.cancel();
+          } catch {
+            /* already closed */
+          }
         }
       },
     };

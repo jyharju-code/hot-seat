@@ -104,6 +104,8 @@ export const turnTimingSchema = z.object({
 export type TurnTiming = z.infer<typeof turnTimingSchema>;
 
 export const serverMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("session_started"), sessionId: z.string().min(1) }),
+  z.object({ type: z.literal("ended"), message: z.string() }),
   z.object({ type: z.literal("state"), state: sessionStateSchema }),
   z.object({
     type: z.literal("transcript"),

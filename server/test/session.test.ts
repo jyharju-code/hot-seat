@@ -567,8 +567,9 @@ describe("Realtime ingress (brief 05a, gap-sensitive fake STT)", () => {
     stt.sessions[0]!.emit({ type: "final", text: "First part." });
     await tick();
     stt.sessions[0]!.emit({ type: "error", message: "Ingress audio slower than real-time" });
-    await tick();
-    await tick();
+    // Reopen waits out the 250 ms reconnect backoff (brief 08 item 3).
+    // Poll so the second final lands inside the reopened turn's window.
+    for (let i = 0; i < 100 && stt.sessions.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
     expect(stt.sessions).toHaveLength(2);
     expect(errors(messages)).toHaveLength(0);
     expect(orch.currentState).toBe("listening");
@@ -586,7 +587,7 @@ describe("Realtime ingress (brief 05a, gap-sensitive fake STT)", () => {
     await orch.start();
     await orch.playbackDone();
     stt.sessions[0]!.remoteClose();
-    await tick();
+    await new Promise((r) => setTimeout(r, 300));
     await tick();
     expect(stt.sessions).toHaveLength(2);
     expect(errors(messages)).toHaveLength(0);
@@ -594,15 +595,15 @@ describe("Realtime ingress (brief 05a, gap-sensitive fake STT)", () => {
     await orch.stop();
   });
 
-  it("shows an error only after two reopen attempts in a row fail", async () => {
+  it("shows an error only after three consecutive STT failures in the turn (brief 08 item 3)", async () => {
     const stt = new GapStt();
     const { orch, messages } = makeOrch(stt);
     await orch.start();
     await orch.playbackDone();
     stt.failNextOpens = 2;
     stt.sessions[0]!.emit({ type: "error", message: "boom" });
-    await tick();
-    await tick();
+    // Dead session (1) + two failed opens (2, 3) with 250/500 ms backoff.
+    await new Promise((r) => setTimeout(r, 1100));
     await tick();
     expect(stt.sessions).toHaveLength(1);
     expect(errors(messages)).toHaveLength(1);
@@ -655,7 +656,7 @@ describe("Escalations (brief 06)", () => {
     // News spoken with Daniel voice / turbo model, before reporter line.
     const newsIdx = h.tts.texts.indexOf("A second post about the café is spreading");
     expect(newsIdx).toBeGreaterThanOrEqual(0);
-    expect(h.tts.options[newsIdx]).toEqual({ voiceId: "3WqHLnw80rOZqJzW9YRB", model: "eleven_v4_turbo" });
+    expect(h.tts.options[newsIdx]).toEqual({ voiceId: "3WqHLnw80rOZqJzW9YRB", model: "eleven_v4_turbo", signal: expect.any(AbortSignal) });
     const ordered = h.events.slice(mark).filter((e) => ["news_flash", "audio", "reporter_line", "audio_end"].includes(e));
     expect(ordered).toEqual(["news_flash", "audio", "audio", "reporter_line", "audio", "audio", "audio_end"]);
     // Recorded for debrief {events} with mm:ss.
@@ -789,7 +790,8 @@ describe("Interruptions (brief 07)", () => {
     expect(decider.calls[0]!.seconds).toBe(9);
     // STT dies (ingress too slow) and reopens inside the same answer.
     s.emit({ type: "error", message: "Ingress audio slower than real-time" });
-    await ticks();
+    // 250 ms reconnect backoff; poll so the next partial lands in the new turn window.
+    for (let i = 0; i < 100 && h.stt.sessions.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
     expect(h.stt.sessions).toHaveLength(2);
     expect(h.messages.some((m) => m.type === "error")).toBe(false);
     // The reopened session only hears new speech; its partial is short.
@@ -823,7 +825,7 @@ describe("Interruptions (brief 07)", () => {
     expect(h.messages).toContainEqual({ type: "transcript", role: "reporter", text: "Sorry, when did you know?" });
     const cutIdx = h.tts.texts.indexOf(YES.say);
     expect(cutIdx).toBeGreaterThanOrEqual(0);
-    expect(h.tts.options[cutIdx]).toEqual({ voiceId: "voice-1", model: "eleven_v4_turbo" });
+    expect(h.tts.options[cutIdx]).toEqual({ voiceId: "voice-1", model: "eleven_v4_turbo", signal: expect.any(AbortSignal) });
     expect(h.messages.some((m) => m.type === "audio_end")).toBe(true);
     expect(h.orch.currentState).toBe("speaking");
     expect(h.logs.some((l) => l.includes("[interrupt] decision latency"))).toBe(true);

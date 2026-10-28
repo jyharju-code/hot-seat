@@ -163,14 +163,31 @@ class MuseSttSession implements SttSession {
 
   async handshake(payload: Record<string, unknown>): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("STT handshake timed out waiting for ack")), 20_000);
+      const closeSocket = () => {
+        try {
+          this.ws.close();
+        } catch {
+          /* already closed */
+        }
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        closeSocket();
+        reject(new Error("STT handshake timed out waiting for ack"));
+      }, 20_000);
       const cleanup = () => {
         clearTimeout(timer);
         this.ws.off("message", onMsg);
         this.ws.off("error", onErr);
+        this.ws.off("close", onClose);
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error("STT socket closed before handshake ack"));
       };
       const onErr = (err: Error) => {
         cleanup();
+        closeSocket();
         reject(err);
       };
       const onMsg = (data: WebSocket.RawData, isBinary: boolean) => {
@@ -183,6 +200,7 @@ class MuseSttSession implements SttSession {
         }
         if (parsed.type === "error") {
           cleanup();
+          closeSocket();
           reject(new Error(`Muse Voice Transcribe error: ${parsed.message ?? "unknown error"}`));
           return;
         }
@@ -194,6 +212,7 @@ class MuseSttSession implements SttSession {
       };
       this.ws.on("message", onMsg);
       this.ws.on("error", onErr);
+      this.ws.on("close", onClose);
       const send = () => this.ws.send(JSON.stringify(payload));
       if (this.ws.readyState === WebSocket.OPEN) send();
       else this.ws.once("open", send);

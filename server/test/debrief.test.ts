@@ -225,6 +225,37 @@ describe("POST /api/sessions/:id/debrief", () => {
     await app.close();
   });
 
+  it("grades by session id and generates only one debrief per session (brief 08 item 8)", async () => {
+    const store = new ScenarioStore();
+    const sessions = new SessionStore();
+    const scenarioId = store.add(cafeTestScenario);
+    const a = sessions.startSession(cafeTestScenario, 0, scenarioId);
+    const b = sessions.startSession(cafeTestScenario, 0, scenarioId);
+    a.turns.push({ role: "user", text: "first run answer", elapsedSeconds: 1, flags: [] });
+    let generations = 0;
+    const app = buildApp(loadConfig({ NODE_ENV: "test" }), {
+      store,
+      sessions,
+      generateDebrief: async (_s, turns) => {
+        generations += 1;
+        expect(turns.map((t) => t.text)).toContain("first run answer");
+        return debriefSchema.parse(sampleDebrief);
+      },
+      imageGen: null,
+    });
+    const first = await app.inject({ method: "POST", url: `/api/sessions/${a.id}/debrief`, payload: {} });
+    expect(first.statusCode).toBe(200);
+    const again = await app.inject({ method: "POST", url: `/api/sessions/${a.id}/debrief`, payload: {} });
+    expect(again.statusCode).toBe(200);
+    expect(again.json().debrief.verdict).toBe(first.json().debrief.verdict);
+    expect(generations).toBe(1);
+    // The scenario id itself is not a session: no record, no debrief.
+    const byScenario = await app.inject({ method: "POST", url: `/api/sessions/${scenarioId}/debrief`, payload: {} });
+    expect(byScenario.statusCode).toBe(404);
+    expect(b.id).not.toBe(a.id);
+    await app.close();
+  });
+
   it("rejects an oversized still and unknown sessions", async () => {
     const { app, id } = makeApp(null);
     const big = Buffer.alloc(2 * 1024 * 1024 + 1).toString("base64");

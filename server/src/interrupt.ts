@@ -17,7 +17,7 @@ export interface InterruptDecisionInput {
 }
 
 export interface InterruptDecider {
-  decide(input: InterruptDecisionInput): Promise<InterruptDecision>;
+  decide(input: InterruptDecisionInput, signal?: AbortSignal): Promise<InterruptDecision>;
 }
 
 export function parseInterruptDecision(text: string): InterruptDecision {
@@ -40,7 +40,7 @@ export class LlmInterruptDecider implements InterruptDecider {
     private readonly model: string,
   ) {}
 
-  async decide(input: InterruptDecisionInput): Promise<InterruptDecision> {
+  async decide(input: InterruptDecisionInput, signal?: AbortSignal): Promise<InterruptDecision> {
     const prompt = fillTemplate(this.template, {
       name: input.name,
       outlet: input.outlet,
@@ -54,6 +54,7 @@ export class LlmInterruptDecider implements InterruptDecider {
       messages: [{ role: "user", content: prompt }],
       maxTokens: 200,
       reasoningEffort: "minimal",
+      ...(signal ? { signal } : {}),
     });
     return parseInterruptDecision(result.text);
   }

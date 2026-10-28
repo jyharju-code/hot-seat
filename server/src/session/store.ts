@@ -7,6 +7,7 @@ import {
   type GeneratedScenario,
   type ReporterFlag,
 } from "@hot-seat/shared";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { dataDirFromEnv, FileStore, type Store } from "../store.js";
 
@@ -30,8 +31,10 @@ export const timedTurnSchema = z.object({
 });
 
 export interface SessionRecord {
-  /** Key used by POST /api/sessions/:id/debrief (the scenario store id). */
+  /** Per-session id issued on start. Key for POST /api/sessions/:sessionId/debrief. */
   id: string;
+  /** Scenario this session ran (kept for older records that lack it in queries). */
+  scenarioId?: string;
   scenario: GeneratedScenario;
   startedAtMs: number;
   turns: TimedTurn[];
@@ -41,6 +44,7 @@ export interface SessionRecord {
 
 export const sessionRecordSchema = z.object({
   id: z.string().min(1),
+  scenarioId: z.string().min(1).optional(),
   scenario: generatedScenarioSchema,
   startedAtMs: z.number(),
   turns: z.array(timedTurnSchema),
@@ -89,6 +93,21 @@ export class SessionStore {
     this.wrap(record);
     this.cache.set(id, record);
     this.backing.put(id, record);
+    return record;
+  }
+
+  /** Start a session with a fresh per-session id (never the scenario id). */
+  startSession(scenario: GeneratedScenario, startedAtMs: number, scenarioId?: string): SessionRecord {
+    const record: SessionRecord = {
+      id: randomUUID(),
+      ...(scenarioId ? { scenarioId } : {}),
+      scenario,
+      startedAtMs,
+      turns: [],
+    };
+    this.wrap(record);
+    this.cache.set(record.id, record);
+    this.backing.put(record.id, record);
     return record;
   }
 

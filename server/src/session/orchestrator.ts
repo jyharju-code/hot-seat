@@ -38,6 +38,16 @@ export interface OrchestratorDeps {
   interruptAfterMs?: number;
   /** Minimum gap between decisions. Default 1500. */
   interruptIntervalMs?: number;
+  /** Listening with no speech at all for this long ends the session. Default 60000. */
+  listenIdleMs?: number;
+  /** Hard cap on session length. Default 600000. */
+  maxSessionMs?: number;
+  /** Backoff delays between STT (re)open attempts. Default [250, 500, 1000]. */
+  sttBackoffMs?: readonly number[];
+  /** Injectable sleep for tests. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Called when the session ends itself (idle / max length), after `ended` is sent. */
+  onSessionEnded?: () => void;
 }
 
 export const NEWS_VOICE_ID = "3WqHLnw80rOZqJzW9YRB";
@@ -48,8 +58,13 @@ export const STT_KEEPALIVE_IDLE_MS = 300;
 export const STT_KEEPALIVE_INTERVAL_MS = 100;
 /** 100 ms of PCM16 at 16 kHz. */
 export const STT_SILENCE_FRAME_BYTES = 3200;
-/** Reopen attempts in a row that may fail before the user sees an error. */
-export const STT_MAX_CONSECUTIVE_OPEN_FAILURES = 2;
+/** Consecutive STT failures in one turn before the user sees an error. */
+export const STT_MAX_CONSECUTIVE_OPEN_FAILURES = 3;
+export const STT_RECONNECT_BACKOFF_MS: readonly number[] = [250, 500, 1000];
+export const LISTEN_IDLE_MS = 60_000;
+export const MAX_SESSION_MS = 600_000;
+export const IDLE_ENDED_MESSAGE = "Session ended after a minute of silence.";
+export const MAX_ENDED_MESSAGE = "Session ended after reaching the maximum session length.";
 export const INTERRUPT_AFTER_MS = 8000;
 export const INTERRUPT_INTERVAL_MS = 1500;
 export const INTERRUPT_TTS_MODEL = "eleven_v4_turbo";
@@ -78,6 +93,11 @@ export class SessionOrchestrator {
   private readonly firedEscalations = new Set<number>();
   private readonly learnedEscalations: Escalation[] = [];
   private lastAnswerInterrupted = false;
+  private abortController = new AbortController();
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private maxTimer: ReturnType<typeof setTimeout> | null = null;
+  private sttFailures = 0;
+  private lastSttError = "STT session closed";
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -93,15 +113,91 @@ export class SessionOrchestrator {
     return this.history;
   }
 
+  private get signal(): AbortSignal {
+    return this.abortController.signal;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    if (this.deps.sleep) return this.deps.sleep(ms);
+    return new Promise((resolve) => {
+      const t = setTimeout(resolve, ms);
+      (t as { unref?: () => void }).unref?.();
+    });
+  }
+
+  private backoffDelay(failures: number): number {
+    const table = this.deps.sttBackoffMs ?? STT_RECONNECT_BACKOFF_MS;
+    return table[Math.min(Math.max(failures - 1, 0), table.length - 1)] ?? 1000;
+  }
+
+  private armIdleTimer(): void {
+    this.clearIdleTimer();
+    if (this.stopped) return;
+    const ms = this.deps.listenIdleMs ?? LISTEN_IDLE_MS;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.stopped || this.state !== "listening") return;
+      this.endSession(IDLE_ENDED_MESSAGE);
+    }, ms);
+    (this.idleTimer as { unref?: () => void }).unref?.();
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  private armMaxTimer(): void {
+    if (this.maxTimer) clearTimeout(this.maxTimer);
+    const ms = this.deps.maxSessionMs ?? MAX_SESSION_MS;
+    this.maxTimer = setTimeout(() => {
+      this.maxTimer = null;
+      if (this.stopped) return;
+      this.endSession(MAX_ENDED_MESSAGE);
+    }, ms);
+    (this.maxTimer as { unref?: () => void }).unref?.();
+  }
+
+  private clearTimers(): void {
+    this.clearIdleTimer();
+    if (this.maxTimer) clearTimeout(this.maxTimer);
+    this.maxTimer = null;
+  }
+
+  /** Speech was heard: the idle clock and the STT failure counter restart. */
+  private noteSpeech(): void {
+    this.sttFailures = 0;
+    if (this.state === "listening") this.armIdleTimer();
+  }
+
+  private endSession(message: string): void {
+    if (this.stopped) return;
+    try {
+      this.deps.sink.send({ type: "ended", message });
+    } catch {
+      /* client gone */
+    }
+    try {
+      this.deps.onSessionEnded?.();
+    } catch {
+      /* best effort */
+    }
+    void this.stop();
+  }
+
   /** Generate and speak the opening question, then wait for playback_done. */
   async start(): Promise<void> {
     this.stopped = false;
+    if (this.abortController.signal.aborted) this.abortController = new AbortController();
     const t0 = this.now();
     this.startedAt = t0;
+    this.armMaxTimer();
     this.setState("thinking");
     try {
-      const line = await this.deps.brain.openingQuestion(this.deps.scenario);
+      const line = await this.deps.brain.openingQuestion(this.deps.scenario, this.signal);
+      if (this.stopped) return;
       const timing = await this.speak(line, t0, t0, t0);
+      if (this.stopped) return;
       this.history.push({ role: "reporter", text: line.say });
       this.deps.record?.turns.push({
         role: "reporter",
@@ -111,6 +207,7 @@ export class SessionOrchestrator {
       });
       this.deps.sink.send({ type: "timing", timing });
     } catch (err) {
+      if (this.stopped) return;
       this.fail(err);
       return;
     }
@@ -135,7 +232,9 @@ export class SessionOrchestrator {
   async stop(): Promise<void> {
     this.stopped = true;
     this.awaitingPlayback = false;
+    this.abortController.abort();
     this.abortSpeculative();
+    this.clearTimers();
     this.stopKeepAlive();
     try {
       this.sttSession?.end();
@@ -180,6 +279,7 @@ export class SessionOrchestrator {
   }
 
   private teardownStt(endStream = false): void {
+    this.clearIdleTimer();
     this.stopKeepAlive();
     try {
       if (endStream) this.sttSession?.end();
@@ -190,19 +290,21 @@ export class SessionOrchestrator {
     this.sttSession = null;
   }
 
-  /** Open a session, retrying once. Returns null after two failures in a row (error already shown). */
+  /** Open a session with backoff. The failure counter is per turn: it is
+   *  reset by beginListening / heard speech, never by a reopen in the turn. */
   private async openSttWithRetry(): Promise<SttSession | null> {
-    let failures = 0;
     while (!this.stopped) {
       try {
         return await this.deps.stt.openSession();
       } catch (err) {
-        failures += 1;
-        this.log(`[stt] open failed (${failures}/${STT_MAX_CONSECUTIVE_OPEN_FAILURES}): ${err instanceof Error ? err.message : String(err)}`);
-        if (failures >= STT_MAX_CONSECUTIVE_OPEN_FAILURES) {
+        this.sttFailures += 1;
+        this.lastSttError = err instanceof Error ? err.message : String(err);
+        this.log(`[stt] open failed (${this.sttFailures}/${STT_MAX_CONSECUTIVE_OPEN_FAILURES}): ${this.lastSttError}`);
+        if (this.sttFailures >= STT_MAX_CONSECUTIVE_OPEN_FAILURES) {
           this.fail(err);
           return null;
         }
+        await this.sleep(this.backoffDelay(this.sttFailures));
       }
     }
     return null;
@@ -210,6 +312,7 @@ export class SessionOrchestrator {
 
   private async beginListening(): Promise<void> {
     if (this.stopped) return;
+    this.sttFailures = 0;
     this.speechEndAt = null;
     const session = await this.openSttWithRetry();
     if (!session || this.stopped) {
@@ -222,6 +325,7 @@ export class SessionOrchestrator {
     }
     this.sttSession = session;
     this.setState("listening");
+    this.armIdleTimer();
     this.startKeepAlive();
     this.sttLoop = this.consumeStt();
     void this.sttLoop.catch((err: unknown) => this.fail(err));
@@ -272,7 +376,7 @@ export class SessionOrchestrator {
             seconds: (started - (answerStartedAt ?? started)) / 1000,
             partial: snapshot,
             facts: persona.facts,
-          });
+          }, this.signal);
           const latencyMs = this.now() - started;
           this.log(`[interrupt] decision latency ${Math.round(latencyMs)}ms interrupt=${decision.interrupt}`);
           if (this.stopped || interruptReq || !decision.interrupt) return;
@@ -297,6 +401,7 @@ export class SessionOrchestrator {
         const reopened = await this.openSttWithRetry();
         if (!reopened || this.stopped) return;
         this.sttSession = reopened;
+        this.armIdleTimer();
         this.startKeepAlive();
       }
       const iter = this.sttSession.events()[Symbol.asyncIterator]();
@@ -330,12 +435,15 @@ export class SessionOrchestrator {
         const ev = result.value;
         if (this.stopped) return;
         if (ev.type === "endpoint") {
+          this.noteSpeech();
           lastEndpointAt = this.now();
           this.speechEndAt = lastEndpointAt;
         } else if (ev.type === "error") {
+          this.lastSttError = ev.message;
           this.log(`[stt] session error while listening: ${ev.message}; reopening`);
           sessionDead = true;
         } else if (ev.type === "partial") {
+          this.noteSpeech();
           if (parts.length > 0) this.abortSpeculative();
           const text = ev.text.trim();
           if (text) {
@@ -350,6 +458,7 @@ export class SessionOrchestrator {
         } else if (ev.type === "final") {
           const segment = ev.text.trim();
           if (!segment) continue;
+          this.noteSpeech();
           if (answerStartedAt === null) answerStartedAt = this.now();
           parts.push(segment);
           pendingPartial = "";
@@ -371,8 +480,15 @@ export class SessionOrchestrator {
           latestPartial = parts.join(" ");
         }
         pendingPartial = "";
+        this.sttFailures += 1;
         this.log(`[stt] session ended while listening; reopening (kept ${parts.length} answer segment(s))`);
         this.teardownStt();
+        if (this.sttFailures >= STT_MAX_CONSECUTIVE_OPEN_FAILURES) {
+          this.fail(new Error(this.lastSttError));
+          return;
+        }
+        await this.sleep(this.backoffDelay(this.sttFailures));
+        if (this.stopped) return;
         continue;
       }
       break;
@@ -397,6 +513,8 @@ export class SessionOrchestrator {
   private startSpeculative(answer: string): void {
     this.speculative?.controller.abort();
     const controller = new AbortController();
+    if (this.signal.aborted) controller.abort();
+    else this.signal.addEventListener("abort", () => controller.abort(), { once: true });
     const history: ConversationTurn[] = [...this.history, { role: "user", text: answer }];
     const promise = Promise.resolve().then(() =>
       this.deps.brain.nextTurn(
@@ -439,6 +557,7 @@ export class SessionOrchestrator {
     for await (const chunk of this.deps.tts.synthesize(text, {
       voiceId: this.deps.newsVoiceId ?? NEWS_VOICE_ID,
       model: this.deps.newsTtsModel ?? NEWS_TTS_MODEL,
+      signal: this.signal,
     })) {
       if (this.stopped) break;
       this.deps.sink.sendAudio(chunk);
@@ -474,7 +593,7 @@ export class SessionOrchestrator {
     this.setState("speaking");
     let firstAudioAt: number | null = null;
     try {
-      for await (const chunk of this.deps.tts.synthesize(req.say, { voiceId: this.deps.voiceId, model: INTERRUPT_TTS_MODEL })) {
+      for await (const chunk of this.deps.tts.synthesize(req.say, { voiceId: this.deps.voiceId, model: INTERRUPT_TTS_MODEL, signal: this.signal })) {
         if (this.stopped) break;
         if (firstAudioAt === null) {
           firstAudioAt = this.now();
@@ -485,10 +604,12 @@ export class SessionOrchestrator {
         this.deps.sink.sendAudio(chunk);
       }
     } catch (err) {
+      if (this.stopped) return;
       this.fail(err);
       await this.beginListening();
       return;
     }
+    if (this.stopped) return;
     this.deps.sink.send({ type: "audio_end" });
     if (!this.stopped) this.awaitingPlayback = true;
   }
@@ -528,7 +649,7 @@ export class SessionOrchestrator {
             [...this.history],
             userText,
             this.elapsedSeconds(),
-            undefined,
+            this.signal,
             [...this.learnedEscalations],
           ),
         );
@@ -539,7 +660,9 @@ export class SessionOrchestrator {
           atSeconds: this.elapsedSeconds(),
         });
         await this.speakNews(escalation.news_flash);
+        if (this.stopped) return;
         line = await linePromise;
+        if (this.stopped) return;
       } else if (this.speculative && this.speculative.answer === userText) {
         // Never speak a reply generated from a shorter answer than the final one.
         const pending = this.speculative.promise;
@@ -552,11 +675,13 @@ export class SessionOrchestrator {
           [...this.history],
           userText,
           this.elapsedSeconds(),
-          undefined,
+          this.signal,
           [...this.learnedEscalations],
         );
       }
+      if (this.stopped) return;
     } catch (err) {
+      if (this.stopped) return;
       this.fail(err);
       await this.beginListening();
       return;
@@ -574,10 +699,12 @@ export class SessionOrchestrator {
     try {
       timing = await this.speak(line, speechEndAt, finalAt, llmAt);
     } catch (err) {
+      if (this.stopped) return;
       this.fail(err);
       await this.beginListening();
       return;
     }
+    if (this.stopped) return;
     this.deps.sink.send({ type: "timing", timing });
     this.log(
       `[turn ${timing.turn}] speechEnd->final ${Math.round(timing.speechEndToFinalMs)}ms ` +
@@ -594,7 +721,7 @@ export class SessionOrchestrator {
     this.deps.sink.send({ type: "transcript", role: "reporter", text: stripAudioTags(line.say) });
     this.setState("speaking");
     let firstAudioAt: number | null = null;
-    for await (const chunk of this.deps.tts.synthesize(line.say, { voiceId: this.deps.voiceId })) {
+    for await (const chunk of this.deps.tts.synthesize(line.say, { voiceId: this.deps.voiceId, signal: this.signal })) {
       if (this.stopped) break;
       if (firstAudioAt === null) firstAudioAt = this.now();
       this.deps.sink.sendAudio(chunk);

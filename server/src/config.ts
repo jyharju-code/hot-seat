@@ -17,6 +17,8 @@ const envSchema = z.object({
   SCENARIO_REASONING: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   DATA_DIR: z.string().min(1).default("./data"),
   TURN_END_SILENCE_MS: z.coerce.number().int().positive().max(60_000).default(1500),
+  LISTEN_IDLE_MS: z.coerce.number().int().positive().max(3_600_000).default(60_000),
+  MAX_SESSION_MS: z.coerce.number().int().positive().max(3_600_000).default(600_000),
   INTERRUPTS: z.enum(["on", "off"]).default("on"),
 });
 

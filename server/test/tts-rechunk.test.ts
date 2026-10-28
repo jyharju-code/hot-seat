@@ -54,6 +54,30 @@ describe("rechunkPcm16", () => {
   });
 });
 
+describe("ElevenLabsTextToSpeech cancellation (brief 08 item 4)", () => {
+  it("passes the AbortSignal to fetch and cancels the reader when the consumer stops early", async () => {
+    let seenSignal: AbortSignal | undefined;
+    let readerCancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(4800)); },
+      cancel() { readerCancelled = true; },
+    });
+    const fetchFn = (async (_u: string, init?: RequestInit) => {
+      seenSignal = init?.signal ?? undefined;
+      return new Response(stream, { status: 200 });
+    }) as unknown as typeof fetch;
+    const tts = new ElevenLabsTextToSpeech({ apiKey: "test", defaultVoiceId: "v1", fetchFn });
+    const controller = new AbortController();
+    const iter = tts.synthesize("hello", { signal: controller.signal })[Symbol.asyncIterator]();
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    if (iter.return) await iter.return(undefined);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(seenSignal).toBe(controller.signal);
+    expect(readerCancelled).toBe(true);
+  });
+});
+
 describe("ElevenLabsTextToSpeech rechunking", () => {
   it("yields only even-length chunks from an odd-chunked upstream stream", async () => {
     const parts = [new Uint8Array([1, 2, 3]), new Uint8Array([4]), new Uint8Array([5, 6, 7, 8, 9])];

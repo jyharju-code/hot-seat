@@ -99,7 +99,7 @@ export class JournalistBrain {
   }
 
   /** Generated scenarios carry their opening question: no extra LLM call. */
-  async openingQuestion(scenario: BrainScenario): Promise<ReporterLine> {
+  async openingQuestion(scenario: BrainScenario, signal?: AbortSignal): Promise<ReporterLine> {
     const p = persona(scenario);
     if (p.openingQuestion) {
       return { move: "new_angle", flags: [], say: p.openingQuestion, quote_used: null };
@@ -108,7 +108,7 @@ export class JournalistBrain {
       ...this.vars(scenario, 0),
       spoken_style: this.prompts.spokenStyle,
     });
-    return this.ask(prompt);
+    return this.ask(prompt, signal);
   }
 
   async nextTurn(
