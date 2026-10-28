@@ -122,6 +122,8 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 describe("JournalistBrain", () => {
   it("parses valid reporter JSON and rejects invalid", () => {
     expect(parseReporterLine(VALID).move).toBe("follow_up");
+    expect(parseReporterLine(JSON.stringify({ move: "follow_up", flags: [], say: "x", quote_used: null, owner_done: false })).owner_done).toBe(false);
+    expect(parseReporterLine(JSON.stringify({ move: "follow_up", flags: [], say: "x", quote_used: null, owner_done: true })).owner_done).toBe(true);
     expect(() => parseReporterLine("not json")).toThrow();
     expect(() => parseReporterLine('{"move":"nope","flags":[],"say":"x","quote_used":null}')).toThrow();
   });
@@ -312,6 +314,83 @@ describe("SessionOrchestrator (fake adapters)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("owner_done false keeps waiting past the normal window for a complete sentence", async () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const { stt, messages, orch } = await started({
+      turnEndSilenceMs: 100,
+      turnEndHesitantMs: 800,
+      nextTurn: async () => ({ ...parseReporterLine(VALID), owner_done: false }),
+    });
+    const complete = "We closed the cafe that morning and told every customer directly today.";
+    stt.sessions[0]!.emit({ type: "final", text: complete });
+    await wait(250);
+    expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+    await wait(700);
+    expect(messages).toContainEqual({ type: "transcript", role: "user", text: complete });
+    await orch.stop();
+  });
+
+  it("owner_done true ends hesitant wording at the normal window and flushes speculative TTS", async () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const { stt, tts, messages, audio, orch } = await started({
+      turnEndSilenceMs: 100,
+      turnEndHesitantMs: 800,
+      nextTurn: async () => ({ ...parseReporterLine(VALID), owner_done: true }),
+    });
+    const openingAudio = audio.length;
+    stt.sessions[0]!.emit({ type: "final", text: "well, so the thing is I, let me think." });
+    await wait(30);
+    // Speculative TTS has started but no audio has been sent before turn end.
+    expect(tts.texts.length).toBeGreaterThan(1);
+    expect(audio.length).toBe(openingAudio);
+    await wait(250);
+    expect(messages).toContainEqual({ type: "transcript", role: "user", text: "well, so the thing is I, let me think." });
+    expect(audio.length).toBeGreaterThan(openingAudio);
+    const timing = messages.filter((m) => m.type === "timing").at(-1);
+    if (!timing || timing.type !== "timing") throw new Error("expected timing");
+    expect(timing.timing.speculativeTtsUsed).toBe(true);
+    await orch.stop();
+  });
+
+  it("owner_done not arrived falls back to the word heuristic", async () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const { stt, messages, orch } = await started({
+      turnEndSilenceMs: 100,
+      turnEndHesitantMs: 800,
+      nextTurn: async () => {
+        await wait(300);
+        return { ...parseReporterLine(VALID), owner_done: false };
+      },
+    });
+    const complete = "We closed the cafe that morning and told every customer directly today.";
+    stt.sessions[0]!.emit({ type: "final", text: complete });
+    await wait(200);
+    // Turn ended at the heuristic window even though the LLM had not replied.
+    expect(messages).toContainEqual({ type: "transcript", role: "user", text: complete });
+    await orch.stop();
+  });
+
+  it("speculative TTS buffer is discarded when speech resumes", async () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const { stt, tts, audio, orch } = await started({
+      turnEndSilenceMs: 150,
+      turnEndHesitantMs: 150,
+      nextTurn: async () => ({ ...parseReporterLine(VALID), owner_done: true }),
+    });
+    const openingAudio = audio.length;
+    const s = stt.sessions[0]!;
+    s.emit({ type: "final", text: "We fixed it." });
+    await wait(30);
+    expect(tts.texts).toContain(parseReporterLine(VALID).say);
+    const ttsCallsAfterFirst = tts.texts.length;
+    s.emit({ type: "final", text: "And we paid compensation." });
+    await wait(400);
+    // Only the final line's audio (2 chunks) was sent, not the discarded buffer.
+    expect(tts.texts.length).toBeGreaterThan(ttsCallsAfterFirst);
+    expect(audio.length).toBe(openingAudio + 2);
+    await orch.stop();
   });
 
   it("complete answer still ends at the default window, and continued speech aborts speculative", async () => {

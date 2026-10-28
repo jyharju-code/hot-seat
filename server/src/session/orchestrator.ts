@@ -5,6 +5,7 @@ import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { SessionRecord } from "./store.js";
 import { TURN_END_HESITANT_MS, TURN_END_SILENCE_MS, turnEndSilenceMs } from "./turn-end.js";
+import { SpeculativeTtsBuffer } from "./speculative-tts.js";
 import {
   KEEPALIVE_DEFICIT_MS,
   KEEPALIVE_INTERVAL_MS,
@@ -25,7 +26,7 @@ export interface OrchestratorDeps {
   sink: ClientSink;
   scenario: BrainScenario;
   voiceId: string;
-  /** Silence after the last final/partial before the turn ends. Default 1500. */
+  /** Silence after the last final/partial before the turn ends. Default 1000. */
   turnEndSilenceMs?: number;
   /** Extended silence when the answer looks unfinished. Default 3200. */
   turnEndHesitantMs?: number;
@@ -102,7 +103,14 @@ export class SessionOrchestrator {
   private speechEndAt: number | null = null;
   private sttLoop: Promise<void> | null = null;
   private startedAt: number | null = null;
-  private speculative: { answer: string; controller: AbortController; promise: Promise<ReporterLine> } | null = null;
+  private speculative: {
+    answer: string;
+    controller: AbortController;
+    promise: Promise<ReporterLine>;
+    ownerDone: boolean | null;
+    settled: boolean;
+    ttsBuffer: SpeculativeTtsBuffer | null;
+  } | null = null;
   private awaitingPlayback = false;
   private keepAlive: SttKeepAliveTracker | null = null;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -436,21 +444,43 @@ export class SessionOrchestrator {
           result = await nextP;
         } else {
           const TIMEOUT = Symbol("silence");
-          let timer: ReturnType<typeof setTimeout> | undefined;
+          const SPEC = Symbol("speculative");
           const answerSoFar = [...parts, ...(pendingPartial ? [pendingPartial] : [])].join(" ");
-          const windowMs = turnEndSilenceMs(answerSoFar, { silenceMs, hesitantMs });
-          const raced = await Promise.race([
-            nextP,
-            new Promise<typeof TIMEOUT>((resolve) => {
-              timer = setTimeout(() => resolve(TIMEOUT), windowMs);
-            }),
-          ]);
-          if (timer) clearTimeout(timer);
-          if (raced === TIMEOUT) {
-            turnEnded = true;
+          let waitedMs = 0;
+          let resolved: IteratorResult<SttEvent> | null = null;
+          while (!this.stopped && !turnEnded) {
+            const spec = this.speculative?.answer === answerSoFar ? this.speculative : null;
+            const windowMs = turnEndSilenceMs(answerSoFar, { silenceMs, hesitantMs }, spec ? spec.ownerDone : null);
+            const remaining = windowMs - waitedMs;
+            if (remaining <= 0) {
+              turnEnded = true;
+              break;
+            }
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const racers: Array<Promise<IteratorResult<SttEvent> | typeof TIMEOUT | typeof SPEC>> = [
+              nextP,
+              new Promise<typeof TIMEOUT>((resolve) => {
+                timer = setTimeout(() => resolve(TIMEOUT), remaining);
+              }),
+            ];
+            if (spec && !spec.settled) {
+              racers.push(spec.promise.then(() => SPEC, () => SPEC));
+            }
+            const raceStartedAt = this.now();
+            const raced = await Promise.race(racers);
+            if (timer) clearTimeout(timer);
+            waitedMs += Math.max(0, Math.floor(this.now() - raceStartedAt));
+            if (raced === SPEC) continue;
+            if (raced === TIMEOUT) {
+              turnEnded = true;
+              break;
+            }
+            resolved = raced as IteratorResult<SttEvent>;
             break;
           }
-          result = raced as IteratorResult<SttEvent>;
+          if (turnEnded) break;
+          if (!resolved) break;
+          result = resolved;
         }
         if (result.done) {
           sessionDead = true;
@@ -551,11 +581,42 @@ export class SessionOrchestrator {
       ),
     );
     promise.catch(() => undefined);
-    this.speculative = { answer, controller, promise };
+    const spec = {
+      answer,
+      controller,
+      promise,
+      ownerDone: null as boolean | null,
+      settled: false,
+      ttsBuffer: null as SpeculativeTtsBuffer | null,
+    };
+    this.speculative = spec;
+    promise.then(
+      (line) => {
+        spec.settled = true;
+        spec.ownerDone = line.owner_done ?? null;
+        if (this.speculative !== spec || this.stopped) return;
+        if (line.owner_done === true) {
+          try {
+            spec.ttsBuffer = SpeculativeTtsBuffer.start(this.deps.tts, line.say, {
+              voiceId: this.deps.voiceId,
+              signal: controller.signal,
+            });
+          } catch {
+            spec.ttsBuffer = null;
+          }
+        }
+      },
+      () => {
+        spec.settled = true;
+      },
+    );
   }
 
   private abortSpeculative(): void {
-    this.speculative?.controller.abort();
+    if (this.speculative) {
+      this.speculative.ttsBuffer?.discard();
+      this.speculative.controller.abort();
+    }
     this.speculative = null;
   }
 
@@ -656,6 +717,7 @@ export class SessionOrchestrator {
     // Turn boundary: at most one escalation fires here, before the reply.
     const escalation = this.takeDueEscalation();
     let line: ReporterLine;
+    let speculativeBuffer: SpeculativeTtsBuffer | null = null;
     try {
       if (escalation) {
         // The speculative reply was generated without the new fact.
@@ -689,9 +751,16 @@ export class SessionOrchestrator {
         if (this.stopped) return;
       } else if (this.speculative && this.speculative.answer === userText) {
         // Never speak a reply generated from a shorter answer than the final one.
-        const pending = this.speculative.promise;
+        const spec = this.speculative;
+        const pending = spec.promise;
         this.speculative = null;
         line = await pending;
+        // Audio buffered for this exact line may be flushed now, and only now.
+        if (spec.ttsBuffer && spec.ttsBuffer.text === line.say && !spec.ttsBuffer.isDiscarded && !spec.ttsBuffer.error) {
+          speculativeBuffer = spec.ttsBuffer;
+        } else {
+          spec.ttsBuffer?.discard();
+        }
       } else {
         this.abortSpeculative();
         line = await this.deps.brain.nextTurn(
@@ -721,7 +790,7 @@ export class SessionOrchestrator {
     this.history.push({ role: "reporter", text: line.say });
     let timing: TurnTiming;
     try {
-      timing = await this.speak(line, speechEndAt, finalAt, llmAt);
+      timing = await this.speak(line, speechEndAt, finalAt, llmAt, speculativeBuffer);
     } catch (err) {
       if (this.stopped) return;
       this.fail(err);
@@ -733,22 +802,35 @@ export class SessionOrchestrator {
     this.log(
       `[turn ${timing.turn}] speechEnd->final ${Math.round(timing.speechEndToFinalMs)}ms ` +
         `speechEnd->llm ${Math.round(timing.speechEndToLlmMs)}ms ` +
-        `speechEnd->firstAudio ${Math.round(timing.speechEndToFirstAudioMs)}ms totalToVoice ${Math.round(timing.totalToFirstAudioMs)}ms`,
+        `speechEnd->firstAudio ${Math.round(timing.speechEndToFirstAudioMs)}ms totalToVoice ${Math.round(timing.totalToFirstAudioMs)}ms speculativeTtsUsed=${timing.speculativeTtsUsed}`,
     );
     // Wait for playback_done before opening the next STT session.
     if (!this.stopped) this.awaitingPlayback = true;
   }
 
   /** Emit reporter_line, stream TTS audio, emit audio_end. Returns timing. */
-  private async speak(line: ReporterLine, speechEndAt: number, finalAt: number, llmAt: number): Promise<TurnTiming> {
+  private async speak(
+    line: ReporterLine,
+    speechEndAt: number,
+    finalAt: number,
+    llmAt: number,
+    speculativeBuffer: SpeculativeTtsBuffer | null = null,
+  ): Promise<TurnTiming> {
     this.deps.sink.send({ type: "reporter_line", line });
     this.deps.sink.send({ type: "transcript", role: "reporter", text: stripAudioTags(line.say) });
     this.setState("speaking");
     let firstAudioAt: number | null = null;
-    for await (const chunk of this.deps.tts.synthesize(line.say, { voiceId: this.deps.voiceId, signal: this.signal })) {
-      if (this.stopped) break;
+    const onChunk = (chunk: Uint8Array) => {
       if (firstAudioAt === null) firstAudioAt = this.now();
       this.deps.sink.sendAudio(chunk);
+    };
+    if (speculativeBuffer) {
+      await speculativeBuffer.drain(onChunk, () => this.stopped);
+    } else {
+      for await (const chunk of this.deps.tts.synthesize(line.say, { voiceId: this.deps.voiceId, signal: this.signal })) {
+        if (this.stopped) break;
+        onChunk(chunk);
+      }
     }
     const first = firstAudioAt ?? this.now();
     this.deps.sink.send({ type: "audio_end" });
@@ -758,6 +840,7 @@ export class SessionOrchestrator {
       speechEndToLlmMs: Math.max(0, llmAt - speechEndAt),
       speechEndToFirstAudioMs: Math.max(0, first - speechEndAt),
       totalToFirstAudioMs: Math.max(0, first - speechEndAt),
+      speculativeTtsUsed: speculativeBuffer !== null,
     };
   }
 }
