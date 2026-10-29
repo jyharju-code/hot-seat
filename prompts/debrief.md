@@ -6,6 +6,8 @@ Landmines with who knew what and whether the reporter learned them during the se
 Full transcript with timestamps and speakers: {transcript}
 Reporter flags per turn: {events}
 Quotes the reporter harvested (profile mode only, otherwise none): {harvested_quotes}
+Interview map (beat, status, questions asked). Use it to say exactly what was dodged: a beat asked once and admitted stopped the questions; a dodged beat was asked and avoided:
+{interview_map}
 
 Write the debrief in {language}. Be direct and useful, like a coach who respects the person.
 Judge what they actually said, not what they meant. Quote exactly.

@@ -190,6 +190,7 @@ export function App() {
         </main>
       ) : view.kind === "debrief" ? (
         <DebriefView
+          interviewMap={view.data.interviewMap}
           debrief={view.data.debrief}
           scenario={view.built.scenario}
           frontPage={view.data.frontPage}
@@ -357,6 +358,7 @@ export function HtmlFrontPageView({
 
 function DebriefView({
   debrief,
+  interviewMap,
   scenario,
   frontPage: initialFrontPage,
   sessionId,
@@ -364,6 +366,7 @@ function DebriefView({
   onNewCrisis,
 }: {
   debrief: Debrief;
+  interviewMap?: DebriefResponse["interviewMap"];
   scenario: GeneratedScenario;
   frontPage: DebriefResponse["frontPage"];
   sessionId: string | null;
@@ -425,6 +428,20 @@ function DebriefView({
           </div>
         ))}
       </section>
+
+      {interviewMap && interviewMap.length > 0 && (
+        <section className="debrief-section interview-map" aria-label="Interview map">
+          <h2>Interview map</h2>
+          <ul className="landmine-list">
+            {interviewMap.map((row) => (
+              <li key={row.id}>
+                <span>{row.goal}</span>{" "}
+                <span className="landmine-status">{row.status === "open" || row.status === "active" ? "not reached" : row.status}.</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {debrief.best_moments.length > 0 && (
         <section className="debrief-section" aria-label="Best moments">

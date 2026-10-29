@@ -49,6 +49,7 @@ export type DebriefGenerator = (
   scenario: GeneratedScenario,
   turns: readonly TimedTurn[],
   language?: string,
+  interviewMap?: string,
 ) => Promise<Debrief>;
 
 /** Debrief coach: Muse Wonder (structured, medium) validated with zod. */
@@ -71,6 +72,7 @@ export class DebriefCoach {
     scenario: GeneratedScenario,
     turns: readonly TimedTurn[],
     language = "en",
+    interviewMap = "",
   ): Promise<Debrief> {
     const template = await loadPrompt("debrief.md");
     const coachKnowledge = await loadPrompt("coach-knowledge.md");
@@ -84,6 +86,7 @@ export class DebriefCoach {
       transcript: formatTranscript(turns),
       events: formatEvents(turns),
       harvested_quotes: formatHarvestedQuotes(turns),
+      interview_map: interviewMap || "(no interview map)",
       language,
     });
     this.log(`[debrief] prompt chars=${prompt.length}`);

@@ -40,6 +40,7 @@ export interface TranscriptLine {
   text: string;
 }
 
+export interface InterviewSummary { beats_touched: string[]; final_statuses: Record<string, string>; repeat_count: number; longest_run: number }
 export interface DebriefOutcome {
   /** Debrief POST time (kept as `ms` for older report readers). */
   ms: number;
@@ -47,6 +48,7 @@ export interface DebriefOutcome {
   front_page_ms: number | null;
   front_page: boolean;
   headline: string | null;
+  interview?: InterviewSummary | null;
   news_clip_ms?: number | null;
   news_clip?: boolean;
   soundbite_located?: boolean | null;
@@ -122,6 +124,7 @@ export interface SessionResult {
   errors: number;
   failure: string | null;
   debrief: DebriefOutcome | null;
+  interview?: InterviewSummary | null;
   mode?: "hot_seat" | "profile";
   session_complete?: boolean;
   wrap_up_spoken?: boolean;
@@ -229,6 +232,7 @@ export class SimSession {
       }
       if (this.opts.debrief && this.state.sessionId) {
         result.debrief = await this.endAndDebrief(this.state.sessionId);
+        result.interview = result.debrief.interview ?? null;
       } else {
         this.sendStop();
       }
@@ -462,7 +466,13 @@ export class SimSession {
     });
     const debriefMs = Math.round(performance.now() - started);
     if (!res.ok) throw new Error(`debrief failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
-    const body = (await res.json()) as { debrief?: { front_page?: { headline?: string } }; frontPage?: unknown };
+    const body = (await res.json()) as { debrief?: { front_page?: { headline?: string } }; frontPage?: unknown; interviewMap?: Array<{ id: string; status: string; questions: number }>; interviewRepeatCount?: number; interviewLongestRun?: number };
+    const interview: InterviewSummary | null = body.interviewMap ? {
+      beats_touched: body.interviewMap.filter((b) => b.questions > 0).map((b) => b.id),
+      final_statuses: Object.fromEntries(body.interviewMap.map((b) => [b.id, b.status])),
+      repeat_count: body.interviewRepeatCount ?? 0,
+      longest_run: body.interviewLongestRun ?? 0,
+    } : null;
     if (body.frontPage != null) {
       const news = await pollNewsClip(this.opts.httpBase, sessionId);
       this.log(
@@ -474,6 +484,7 @@ export class SimSession {
         front_page_ms: 0,
         front_page: true,
         headline: body.debrief?.front_page?.headline ?? null,
+        interview,
         news_clip_ms: news.ms,
         news_clip: news.news_clip,
         soundbite_located: news.soundbite_located,
@@ -492,6 +503,7 @@ export class SimSession {
       front_page_ms: polled.ms,
       front_page: polled.front_page,
       headline: body.debrief?.front_page?.headline ?? null,
+        interview,
       news_clip_ms: news.ms,
       news_clip: news.news_clip,
       soundbite_located: news.soundbite_located,

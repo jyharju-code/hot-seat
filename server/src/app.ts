@@ -103,9 +103,26 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
 
   const sessions = deps.sessions ?? new SessionStore(config.dataDir);
 
+  const interviewExtras = (record: { interview?: unknown }): Pick<DebriefResponse, "interviewMap" | "interviewRepeatCount" | "interviewLongestRun"> => {
+    const inv = record.interview as { beats?: Array<{ id: string; goal: string; kind: never; status: never; questions: number }>; repeatCount?: number; servedBeats?: string[] } | undefined;
+    if (!inv?.beats) return {};
+    let longest = 0, run = 0, prev: string | null = null;
+    for (const id of inv.servedBeats ?? []) { run = id === prev ? run + 1 : 1; prev = id; longest = Math.max(longest, run); }
+    return {
+      interviewMap: inv.beats.map((b) => ({ id: b.id, goal: b.goal, status: b.status, questions: b.questions, kind: b.kind })),
+      interviewRepeatCount: inv.repeatCount ?? 0,
+      interviewLongestRun: longest,
+    };
+  };
+  const interviewMapText = (record: { interview?: unknown }): string => {
+    const inv = record.interview as { beats?: Array<{ id: string; goal: string; status: string; questions: number }> } | undefined;
+    if (!inv?.beats) return "";
+    return inv.beats.map((b) => `- ${b.id}: ${b.goal} | status=${b.status} | questions=${b.questions}`).join("\n");
+  };
+
   const debriefGen: DebriefGenerator =
     deps.generateDebrief ??
-    (async (scenario, turns, language) => {
+    (async (scenario, turns, language, interviewMap) => {
       if (!config.MODEL_API_KEY) throw new Error("MODEL_API_KEY is not configured on the server");
       const coach = new DebriefCoach(
         new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: "muse-wonder-1.0", chatTimeoutMs: config.turnLlmTimeoutMs, structuredTimeoutMs: config.debriefTimeoutMs }),
@@ -114,7 +131,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
         (line) => app.log.info(line),
         config.debriefTimeoutMs,
       );
-      return coach.generate(scenario, turns, language);
+      return coach.generate(scenario, turns, language, interviewMap);
     });
 
   const imageGen: ImageGen | null =
@@ -394,7 +411,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       // One debrief per session: a repeat call returns the stored one.
       if (record.debrief) {
         startNewsClip(sessionId, record.debrief, record.turns, null);
-        const cached: DebriefResponse = { debrief: record.debrief, frontPage: null };
+        const cached: DebriefResponse = { debrief: record.debrief, frontPage: null, ...interviewExtras(record) };
         return cached;
       }
       const scenario = record.scenario;
@@ -429,7 +446,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       const debriefStarted = performance.now();
       let debrief;
       try {
-        debrief = await debriefGen(scenario, turns, language);
+        debrief = await debriefGen(scenario, turns, language, interviewMapText(record));
       } catch (err) {
         const ms = Math.round(performance.now() - debriefStarted);
         app.log.error(
@@ -454,7 +471,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       // Built in parallel with the front page.
       startNewsClip(sessionId, debrief, turns, still);
 
-      const response: DebriefResponse = { debrief, frontPage: null };
+      const response: DebriefResponse = { debrief, frontPage: null, ...interviewExtras(record) };
       return response;
     },
   );

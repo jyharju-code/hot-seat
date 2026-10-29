@@ -82,6 +82,12 @@ export function buildReport(results: readonly SessionResult[], meta: { preset: s
       lines.push(`Profile ending: session_complete ${session.session_complete ? "yes" : "no"}, wrap-up spoken ${session.wrap_up_spoken ? "yes" : "no"}`, "");
     }
     if (session.failure) lines.push(`Failure: ${session.failure}`, "");
+    if (session.interview) {
+      lines.push(`Interview: beats touched ${session.interview.beats_touched.join(", ") || "none"}; statuses ${Object.entries(session.interview.final_statuses).map(([k, v]) => `${k}=${v}`).join(", ")}; repeats ${session.interview.repeat_count}; longest run ${session.interview.longest_run}`, "");
+    } else if (session.debrief?.interview) {
+      const iv = session.debrief.interview;
+      lines.push(`Interview: beats touched ${iv.beats_touched.join(", ") || "none"}; statuses ${Object.entries(iv.final_statuses).map(([k, v]) => `${k}=${v}`).join(", ")}; repeats ${iv.repeat_count}; longest run ${iv.longest_run}`, "");
+    }
     for (const turn of session.turns) {
       lines.push(
         `- turn ${turn.turn}: latency ${turn.latency_ms === null ? "n/a" : `${turn.latency_ms} ms`}, wer ${turn.wer === null ? "n/a" : turn.wer.toFixed(3)}, split ${turn.split}, interrupted ${turn.interrupted}, repeat ${turn.repeat}, errors ${turn.errors}, reporter words ${turn.reporter_words}`,
