@@ -1,8 +1,9 @@
 You plan a structured interview. Return ONLY JSON matching this shape:
-{"beats": [{"id": "short-id", "goal": "what the reporter wants to get", "done_when": "concrete: what counts as answered", "max_questions": 2, "unlock_at_seconds": 0, "landmine_id": "L1 or omit", "kind": "facts"}]}
+{"beats": [{"id": "short-id", "goal": "what the reporter wants to get", "done_when": "concrete: what counts as answered", "max_questions": 2, "min_questions": 1, "unlock_at_seconds": 0, "landmine_id": "L1 or omit", "kind": "facts"}]}
 
 Rules:
-- 5 to 7 beats. Each max_questions is 2 or 3.
+- 5 to 7 beats. Each max_questions is 2 or 3. min_questions is 2 for profile
+  content beats, 1 for hot seat beats and for any close beat.
 - Hot seat kinds: facts | responsibility | landmine | human_impact | action | close.
   Build: what happened, responsibility, each landmine as its own beat (landmine_id set,
   unlock_at_seconds = its reveal_after_seconds), human impact naming affected people,

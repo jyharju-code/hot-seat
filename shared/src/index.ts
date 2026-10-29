@@ -112,6 +112,10 @@ export const interviewBeatSchema = z.object({
   goal: z.string().min(1),
   done_when: z.string().min(1),
   max_questions: z.union([z.literal(2), z.literal(3)]),
+  /** Brief 17b: questions required before the beat may close (profile 2, hot seat 1). */
+  min_questions: z.number().int().min(1).max(3).optional(),
+  /** Brief 17b: 2..3 beat-specific deterministic transition questions. */
+  fallback_lines: z.array(z.string().min(1)).min(1).max(3).optional(),
   unlock_at_seconds: z.number().nonnegative().optional(),
   landmine_id: z.string().min(1).optional(),
   kind: beatKindSchema,

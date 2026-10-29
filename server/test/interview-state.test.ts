@@ -3,7 +3,8 @@ import { JournalistBrain, parseReporterLine, type JournalistPrompts } from "../s
 import { cafeProfileScenario, cafeTestScenario } from "../src/scenarios/cafe.js";
 import {
   applyCommittedLine, buildFallbackPlan, computeDirective, createInterviewState,
-  interviewSimMetrics, isRepeatLine, transitionQuestionForBeat,
+  fallbackLinesForBeat, interviewSimMetrics, isAlreadyAsked, isRepeatLine, minQuestionsForBeat,
+  nextFallbackLine, normalizeLineText, transitionQuestionForBeat,
 } from "../src/session/interview-state.js";
 import { generateInterviewPlan } from "../src/session/interview-plan.js";
 import { stripTranscriptTokens } from "@hot-seat/shared";
@@ -103,6 +104,77 @@ describe("interview state", () => {
 
   it("strips leaked speaker tokens", () => {
     expect(stripTranscriptTokens("Hello <|speaker_A|> world")).toBe("Hello world");
+  });
+
+  it("brief 17b: min_questions, profile beats need 2 before closing", () => {
+    const prof = buildFallbackPlan(cafeProfileScenario);
+    expect(prof.beats.filter((b) => b.kind !== "close").every((b) => minQuestionsForBeat(b) === 2)).toBe(true);
+    expect(minQuestionsForBeat(prof.beats.find((b) => b.kind === "close")!)).toBe(1);
+    expect(buildFallbackPlan(cafeTestScenario).beats.every((b) => minQuestionsForBeat(b) === 1)).toBe(true);
+    const state = createInterviewState(prof);
+    applyCommittedLine(state, line({ beat_id: "origin", say: "How did it begin?" }), { turn: 1 });
+    applyCommittedLine(state, line({ beat_id: "origin", say: "What made you start?", answer_assessment: "answered" }), { turn: 2 });
+    // One served question on origin so far at assessment time is below min 2: the
+    // assessed (previous) beat had 1 question when the second line was committed.
+    const origin = state.beats.find((b) => b.beat.id === "origin")!;
+    expect(origin.questions).toBe(2);
+    applyCommittedLine(state, line({ beat_id: "business_today", say: "What is it like today?", answer_assessment: "answered" }), { turn: 3 });
+    expect(state.beats.find((b) => b.beat.id === "origin")?.status).toBe("answered");
+  });
+
+  it("brief 17b: fallback lines are beat-specific, 2..3 each, never the canned generic", () => {
+    for (const plan of [buildFallbackPlan(cafeProfileScenario), buildFallbackPlan(cafeTestScenario)]) {
+      for (const beat of plan.beats) {
+        const lines = fallbackLinesForBeat(beat);
+        expect(lines.length).toBeGreaterThanOrEqual(2);
+        expect(lines.length).toBeLessThanOrEqual(3);
+        expect(lines.every((l) => !l.includes("What happens next"))).toBe(true);
+        expect(new Set(lines.map(normalizeLineText)).size).toBe(lines.length);
+      }
+    }
+    const beat = buildFallbackPlan(cafeTestScenario).beats[0]!;
+    const first = transitionQuestionForBeat(beat, { asked: [] });
+    const second = transitionQuestionForBeat(beat, { asked: [first.say] });
+    expect(second.say).not.toBe(first.say);
+    expect(isAlreadyAsked([first.say], second.say)).toBe(false);
+  });
+
+  it("brief 17b: 5-minute profile replay, full answers, depth and no repeats", () => {
+    const state = createInterviewState(buildFallbackPlan(cafeProfileScenario));
+    const spoken: string[] = [];
+    let elapsed = 0;
+    let turn = 0;
+    // Owner answers every question fully; reporter uses the deterministic
+    // fallback picker (the worst case that looped before this brief).
+    while (elapsed < 255 && turn < 30) {
+      turn += 1;
+      const directive = computeDirective(state, { elapsedSeconds: elapsed, durationSeconds: 300 });
+      expect(directive.nextBeat?.kind).not.toBe("close");
+      const next = nextFallbackLine(state, { elapsedSeconds: elapsed, durationSeconds: 300 });
+      expect(next.say).not.toMatch(/\b(thank you|thanks|goodbye)\b/i);
+      expect(isAlreadyAsked(spoken, next.say)).toBe(false);
+      spoken.push(next.say);
+      const isRevisit = directive.reason.includes("revisit");
+      applyCommittedLine(state, {
+        ...next,
+        answer_assessment: "answered",
+        new_open_thread: turn === 2 ? "working with Maya and Tom" : null,
+        new_established: turn === 8 ? ["Maya and Tom work here"] : [],
+      } as never, { turn, elapsedSeconds: elapsed, ...(isRevisit ? { isRevisit: true } : {}) });
+      elapsed += 15;
+      // After content beats are done, exercise a few revisits then jump to wrap-up.
+      const contentDone = state.beats.filter((b) => b.beat.kind !== "close").every((b) => b.status === "answered" || b.status === "exhausted" || b.status === "dodged");
+      if (contentDone && spoken.length >= 14) break;
+    }
+    const content = state.beats.filter((b) => b.beat.kind !== "close");
+    for (const b of content) expect(b.questions, b.beat.id).toBeGreaterThanOrEqual(2);
+    expect(new Set(spoken.map(normalizeLineText)).size).toBe(spoken.length);
+    expect(state.repeatCount).toBe(0);
+    expect(spoken.some((s) => s.includes("Maya and Tom"))).toBe(true);
+    // Close unlocks only at duration minus 45.
+    const atWrap = computeDirective(state, { elapsedSeconds: 260, durationSeconds: 300 });
+    expect(atWrap.nextBeat?.kind ?? atWrap.activeBeat?.kind).toBeDefined();
+    expect(elapsed).toBeLessThan(300);
   });
 });
 

@@ -2,7 +2,7 @@ import { interviewPlanSchema, isProfileScenario, type InterviewPlan } from "@hot
 import type { Llm } from "../providers/llm.js";
 import { fillTemplate, loadPrompt } from "../prompts.js";
 import { isGenerated, primaryJournalist, type BrainScenario } from "../journalist.js";
-import { buildFallbackPlan } from "./interview-state.js";
+import { buildFallbackPlan, withBeatDefaults } from "./interview-state.js";
 
 export const PLAN_TIMEOUT_MS = 20_000;
 export { buildFallbackPlan };
@@ -48,7 +48,7 @@ export async function generateInterviewPlan(
         }
       }
     }
-    return parsed;
+    return withBeatDefaults(parsed);
   } catch {
     return buildFallbackPlan(scenario);
   }

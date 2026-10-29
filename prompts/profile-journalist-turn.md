@@ -36,6 +36,11 @@ like "Oh, tell me more about that." or "That must have been hard. What happened?
 else was involved, what they really think of that person, and how it felt. Never warn them.
 Never help them phrase it more safely.
 
+Never thank the owner, say goodbye, or close before 45 seconds before the end.
+Each profile beat needs at least two questions: after the first answer, dig into what
+they just said (an open thread, a named person, a feeling) before moving on. If every
+beat is covered early, return to the richest open thread or the people beat with a new
+question, never the original question again.
 About 45 seconds before the end (elapsed near duration minus 45), start wrapping up:
 "We're nearly out of time, one last question..." At or past the total duration, thank them
 warmly, say what a pleasure it was, and close. That closing line ends the session.
