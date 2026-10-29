@@ -106,6 +106,19 @@ export const STT_RECONNECT_BACKOFF_MS: readonly number[] = [250, 500, 1000];
 export const LISTEN_IDLE_MS = 60_000;
 export const MAX_SESSION_MS = 720_000;
 export const PROFILE_COMPLETE_MESSAGE = "Thank you so much, that was a pleasure. That is everything I need for the feature.";
+export const PROFILE_SHORT_THANKS_MESSAGE = "Thank you again.";
+
+/** True when a reporter line already closed with a thank-you or goodbye. */
+export function isThankYouOrGoodbyeLine(text: string): boolean {
+  const t = stripAudioTags(text).toLowerCase();
+  return /\b(thank you|thanks|goodbye|farewell)\b/.test(t) || /\bbye\b/.test(t) || /been (such )?a pleasure/.test(t);
+}
+
+/** Final session_complete line: short when the reporter already said goodbye, so it is not said twice. */
+export function finalProfileMessage(lastReporterText: string | null | undefined, ownerSpeaking: boolean): string {
+  if (lastReporterText && isThankYouOrGoodbyeLine(lastReporterText)) return PROFILE_SHORT_THANKS_MESSAGE;
+  return ownerSpeaking ? PROFILE_CUT_IN_MESSAGE : PROFILE_COMPLETE_MESSAGE;
+}
 export { PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE };
 export const IDLE_ENDED_MESSAGE = "Session ended after a minute of silence.";
 export const MAX_ENDED_MESSAGE = "Session ended after reaching the maximum session length.";
@@ -314,7 +327,8 @@ export class SessionOrchestrator {
   private completeProfileSession(): void {
     if (this.profileCompleted || this.stopped) return;
     this.profileCompleted = true;
-    const message = this.ownerSpeaking ? PROFILE_CUT_IN_MESSAGE : PROFILE_COMPLETE_MESSAGE;
+    const lastReporterText = [...this.history].reverse().find((t) => t.role === "reporter")?.text ?? null;
+    const message = finalProfileMessage(lastReporterText, this.ownerSpeaking);
     try {
       this.deps.sink.send({ type: "session_complete", message, ...(this.isBrowserTts ? { voiceHint: this.reporterHint() } : {}) });
     } catch { /* client gone */ }

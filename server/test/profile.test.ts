@@ -16,7 +16,7 @@ import { cafeProfileScenario, cafeTestScenario } from "../src/scenarios/cafe.js"
 import { normalizeProfileScenario } from "../src/scenarios/director.js";
 import { profilePresets, presets } from "../src/scenarios/presets.js";
 import { ScenarioStore } from "../src/scenarios/store.js";
-import { SessionOrchestrator, MAX_SESSION_MS, PROFILE_COMPLETE_MESSAGE, type ClientSink } from "../src/session/orchestrator.js";
+import { SessionOrchestrator, MAX_SESSION_MS, PROFILE_COMPLETE_MESSAGE, finalProfileMessage, isThankYouOrGoodbyeLine, type ClientSink } from "../src/session/orchestrator.js";
 import { PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE } from "@hot-seat/shared";
 import { SessionStore, formatHarvestedQuotes, harvestedQuotes } from "../src/session/store.js";
 import type { SpeechToText, SttEvent, SttSession } from "../src/providers/speech-to-text.js";
@@ -233,6 +233,43 @@ describe("profile orchestrator", () => {
       const complete = messages.find((m) => m.type === "session_complete") as { message: string; voiceHint?: unknown } | undefined;
       expect(complete?.message).toBe(PROFILE_COMPLETE_MESSAGE);
       expect(complete?.voiceHint).toBeTruthy();
+      await orch.stop();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("profile ending: a last reporter thank-you makes the final line short, not a second full goodbye", async () => {
+    expect(isThankYouOrGoodbyeLine("Thank you so much, this has been such a pleasure.")).toBe(true);
+    expect(isThankYouOrGoodbyeLine("Goodbye for now.")).toBe(true);
+    expect(isThankYouOrGoodbyeLine("Thanks a lot.")).toBe(true);
+    expect(isThankYouOrGoodbyeLine("Tell me more about the early days.")).toBe(false);
+    expect(finalProfileMessage("Thank you so much, this has been such a pleasure.", false)).toBe("Thank you again.");
+    expect(finalProfileMessage("Tell me more.", false)).toBe(PROFILE_COMPLETE_MESSAGE);
+    expect(finalProfileMessage("Tell me more.", true)).toBe(PROFILE_CUT_IN_MESSAGE);
+    expect(finalProfileMessage("Thank you so much.", true)).toBe("Thank you again.");
+    vi.useFakeTimers();
+    try {
+      const messages: ServerMessage[] = [];
+      const sink: ClientSink = { send: (m) => messages.push(m), sendAudio: () => undefined };
+      const stt = new FakeStt();
+      const brain = {
+        openingQuestion: async (): Promise<ReporterLine> => ({ move: "new_angle", flags: [], say: "Tell me your story.", quote_used: null }),
+        nextTurn: async (): Promise<ReporterLine> => ({ move: "follow_up", flags: [], say: "Thank you so much, this has been such a pleasure.", quote_used: null }),
+      };
+      const record = { id: "s-thanks", scenario: cafeProfileScenario, startedAtMs: 0, turns: [] as never[] };
+      const orch = new SessionOrchestrator({
+        stt, brain: brain as never, tts: new FakeTts(), ttsProvider: "browser", sink,
+        scenario: cafeProfileScenario, voiceId: "v1", record: record as never,
+        turnEndSilenceMs: 0, turnEndHesitantMs: 0, listenIdleMs: 600_000, maxSessionMs: 720_000,
+      });
+      await orch.start();
+      await orch.playbackDone();
+      stt.sessions[0]!.emit({ type: "final", text: "We opened ten years ago.", turnId: "t1" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const reporterTexts = messages.filter((m) => m.type === "transcript" && m.role === "reporter").map((m) => (m as { text: string }).text);
+      expect(reporterTexts).toContain("Thank you so much, this has been such a pleasure.");
+      await vi.advanceTimersByTimeAsync(300_000);
+      const complete = messages.find((m) => m.type === "session_complete") as { message: string } | undefined;
+      expect(complete?.message).toBe("Thank you again.");
       await orch.stop();
     } finally { vi.useRealTimers(); }
   });
