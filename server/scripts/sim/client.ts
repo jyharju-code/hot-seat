@@ -16,6 +16,11 @@ export function browserFirstAudioAt(arrivalMs: number, speechStartMs?: number | 
   return arrivalMs + Math.max(0, speechStartMs ?? 0);
 }
 
+/** A session_complete ending is a normal end: it satisfies waits for a listening state. */
+export function listeningWaitSatisfied(lastState: string | null, ended: boolean): boolean {
+  return ended || lastState === "listening";
+}
+
 export interface TurnMetric {
   turn: number;
   latency_ms: number | null;
@@ -359,7 +364,16 @@ export class SimSession {
     if (line.audioBytes === 0) this.ws?.send(JSON.stringify({ type: "speech_started", speechStartMs: 0 }));
     await sleep(playbackMs);
     this.ws?.send(JSON.stringify({ type: "playback_done" }));
-    await this.waitFor(() => this.state.lastState === "listening", "listening state");
+    await this.waitFor(() => listeningWaitSatisfied(this.state.lastState, this.state.ended), "listening state");
+    if (this.state.ended) {
+      // session_complete: a normal end. Return so the run loop breaks and the debrief still runs.
+      return {
+        turn: turn + 1, latency_ms: null, split: false, wer: null, interrupted: false,
+        errors: this.state.errorCount - errorsAtStart, reporter_words: wordCount(reporterText),
+        repeat: previousReporter ? isRepeat(previousReporter, reporterText) : false,
+        spoken_text: "", transcript_text: "", reporter_text: reporterText,
+      };
+    }
     const { segments, voiced } = await answerPromise;
     const spokenText = segments.map((s) => s.text).join(" ");
     this.log(`turn ${turn + 1}: speaking ${(pcmDurationMs(voiced.pcm.length) / 1000).toFixed(1)}s: ${spokenText.slice(0, 90)}`);

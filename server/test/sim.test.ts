@@ -20,7 +20,7 @@ import {
 import { estimateTtsChars, parseOwnerSegments } from "../scripts/sim/owner.js";
 import { ReporterLineQueue, linePlaybackMs } from "../scripts/sim/reporter-queue.js";
 import { estimateTotalChars, parseArgs } from "../scripts/sim/main.js";
-import { pollFrontPage, pollNewsClip, browserFirstAudioAt } from "../scripts/sim/client.js";
+import { pollFrontPage, pollNewsClip, browserFirstAudioAt, listeningWaitSatisfied } from "../scripts/sim/client.js";
 import { buildReport } from "../scripts/sim/report.js";
 import { PROFILE_WRAP_UP_LINE, isWrapUpLine } from "@hot-seat/shared";
 
@@ -221,6 +221,12 @@ describe("sim browser latency and profile ending (brief 16b)", () => {
     expect(browserFirstAudioAt(1000, null)).toBe(1000);
     expect(browserFirstAudioAt(1000, 120)).toBe(1120);
     expect(browserFirstAudioAt(1000, -5)).toBe(1000);
+  });
+  it("session_complete satisfies the listening wait, so the sim ends normally and debriefs instead of timing out", () => {
+    expect(listeningWaitSatisfied("speaking", true)).toBe(true);
+    expect(listeningWaitSatisfied("listening", false)).toBe(true);
+    expect(listeningWaitSatisfied("speaking", false)).toBe(false);
+    expect(listeningWaitSatisfied(null, true)).toBe(true);
   });
   it("report prints session_complete and wrap-up for profile runs only", () => {
     expect(isWrapUpLine(PROFILE_WRAP_UP_LINE)).toBe(true);
