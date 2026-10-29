@@ -9,6 +9,7 @@ import {
   type GeneratedScenario,
 } from "@hot-seat/shared";
 import { MIN_REASONING_MAX_TOKENS, type Llm } from "./providers/llm.js";
+import { isTimeoutOrNetworkError, DEBRIEF_TIMEOUT_MS } from "./providers/timeout.js";
 import { classifyImageError, type ImageGen, type ImageResult } from "./providers/image-gen.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
 import { formatEvents, formatHarvestedQuotes, formatTranscript, harvestedQuotes, type TimedTurn } from "./session/store.js";
@@ -56,12 +57,14 @@ export class DebriefCoach {
   private readonly model: string;
   private readonly reasoningEffort: string;
   private readonly log: (line: string) => void;
+  private readonly timeoutMs: number;
 
-  constructor(llm: Llm, model = "muse-wonder-1.0", reasoningEffort = "medium", log?: (line: string) => void) {
+  constructor(llm: Llm, model = "muse-wonder-1.0", reasoningEffort = "medium", log?: (line: string) => void, timeoutMs: number = DEBRIEF_TIMEOUT_MS) {
     this.llm = llm;
     this.model = model;
     this.reasoningEffort = reasoningEffort;
     this.log = log ?? (() => undefined);
+    this.timeoutMs = timeoutMs;
   }
 
   async generate(
@@ -84,22 +87,34 @@ export class DebriefCoach {
       language,
     });
     this.log(`[debrief] prompt chars=${prompt.length}`);
-    const callStarted = performance.now();
-    try {
-      const result = await this.llm.generateStructured({
-        prompt,
-        // Structured JSON plus reasoning: well above the minimum.
-        maxTokens: Math.max(8000, MIN_REASONING_MAX_TOKENS),
-        model: this.model,
-        reasoningEffort: this.reasoningEffort,
-        parse: (raw) => debriefSchema.parse(raw),
-      });
-      this.log(`[debrief] model call ${Math.round(performance.now() - callStarted)}ms`);
-      return result;
-    } catch (err) {
-      this.log(`[debrief] model call failed after ${Math.round(performance.now() - callStarted)}ms`);
-      throw err;
+    // One retry on timeout / network error: worst case 2 x timeout (about 3 min at 90 s).
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const callStarted = performance.now();
+      try {
+        const result = await this.llm.generateStructured({
+          prompt,
+          // Structured JSON plus reasoning: well above the minimum.
+          maxTokens: Math.max(8000, MIN_REASONING_MAX_TOKENS),
+          model: this.model,
+          reasoningEffort: this.reasoningEffort,
+          timeoutMs: this.timeoutMs,
+          parse: (raw) => debriefSchema.parse(raw),
+        });
+        this.log(`[debrief] model call ${Math.round(performance.now() - callStarted)}ms`);
+        return result;
+      } catch (err) {
+        lastErr = err;
+        const elapsed = Math.round(performance.now() - callStarted);
+        if (attempt === 0 && isTimeoutOrNetworkError(err)) {
+          this.log(`[debrief] timeout after ${elapsed}ms, retrying`);
+          continue;
+        }
+        this.log(`[debrief] model call failed after ${elapsed}ms`);
+        throw err;
+      }
     }
+    throw lastErr;
   }
 }
 
@@ -294,15 +309,25 @@ export async function generateFrontPage(
       log(`[front-page] step=${step} result=error promptLength=0`);
       continue;
     }
-    try {
-      const result =
-        step === "generate_storefront" || !still
-          ? await imageGen.generateImage(prompt)
-          : await imageGen.editPhoto({ image: still.image, mimeType: still.mimeType, prompt });
-      log(`[front-page] step=${step} result=ok promptLength=${prompt.length}`);
-      return imageOutcome(result, step);
-    } catch (err) {
-      log(`[front-page] step=${step} result=${classifyImageError(err)} promptLength=${prompt.length}`);
+    // One retry on timeout / network error before falling down the ladder.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const attemptStarted = performance.now();
+      try {
+        const result =
+          step === "generate_storefront" || !still
+            ? await imageGen.generateImage(prompt)
+            : await imageGen.editPhoto({ image: still.image, mimeType: still.mimeType, prompt });
+        log(`[front-page] step=${step} result=ok promptLength=${prompt.length}`);
+        return imageOutcome(result, step);
+      } catch (err) {
+        const elapsed = Math.round(performance.now() - attemptStarted);
+        if (attempt === 0 && isTimeoutOrNetworkError(err)) {
+          log(`[front-page] timeout after ${elapsed}ms, retrying`);
+          continue;
+        }
+        log(`[front-page] step=${step} result=${classifyImageError(err)} promptLength=${prompt.length}`);
+        break;
+      }
     }
   }
   log(`[front-page] step=html result=ok promptLength=0`);

@@ -1,4 +1,5 @@
 import { NotImplementedError } from "./errors.js";
+import { IMAGE_TIMEOUT_MS, timeoutSignal } from "./timeout.js";
 
 export interface ImageEditInput {
   /** Source photo bytes (for example a webcam still for the front page). */
@@ -61,6 +62,7 @@ export interface MetaImageGenOptions {
   baseUrl?: string;
   model?: string;
   fetchFn?: typeof fetch;
+  timeoutMs?: number;
 }
 
 interface ImagesResponse {
@@ -78,6 +80,7 @@ export class MetaImageGen implements ImageGen {
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly fetchFn: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(options: MetaImageGenOptions) {
     if (!options.apiKey) throw new Error("MetaImageGen requires an apiKey (MODEL_API_KEY)");
@@ -85,12 +88,14 @@ export class MetaImageGen implements ImageGen {
     this.baseUrl = (options.baseUrl ?? "https://api.meta.ai/v1").replace(/\/$/, "");
     this.model = options.model ?? "muse-image-1.0";
     this.fetchFn = options.fetchFn ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? IMAGE_TIMEOUT_MS;
   }
 
   async generateImage(prompt: string): Promise<ImageResult> {
     const res = await this.fetchFn(`${this.baseUrl}/images/generations`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
+      signal: timeoutSignal(this.timeoutMs),
       body: JSON.stringify({ model: this.model, prompt }),
     });
     return this.parseResult(res, "generations");
@@ -109,6 +114,7 @@ export class MetaImageGen implements ImageGen {
     const res = await this.fetchFn(`${this.baseUrl}/images/edits`, {
       method: "POST",
       headers: { authorization: `Bearer ${this.apiKey}` },
+      signal: timeoutSignal(this.timeoutMs),
       body: form,
     });
     return this.parseResult(res, "edits");
@@ -132,7 +138,7 @@ export class MetaImageGen implements ImageGen {
       return { image, mimeType: sniffMime(image) };
     }
     if (first?.url) {
-      const fetched = await this.fetchFn(first.url);
+      const fetched = await this.fetchFn(first.url, { signal: timeoutSignal(this.timeoutMs) });
       if (!fetched.ok) throw new Error(`Meta Muse Image result download failed: ${fetched.status}`);
       const image = new Uint8Array(await fetched.arrayBuffer());
       return { image, mimeType: fetched.headers.get("content-type") ?? sniffMime(image) };

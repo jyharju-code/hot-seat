@@ -60,11 +60,11 @@ wss.on("connection", (ws: WebSocket) => {
       let turnModel = config.llmChatModel;
       if (config.turnLlm === "baseten") {
         if (!config.BASETEN_API_KEY) throw new Error("BASETEN_API_KEY is not configured on the server");
-        primaryLlm = new BasetenLlm({ apiKey: config.BASETEN_API_KEY });
+        primaryLlm = new BasetenLlm({ apiKey: config.BASETEN_API_KEY, chatTimeoutMs: config.turnLlmTimeoutMs });
         turnModel = BASETEN_DEFAULT_MODEL;
         primaryProvider = { name: "baseten", llm: primaryLlm, model: turnModel };
       } else {
-        primaryLlm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel });
+        primaryLlm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel, chatTimeoutMs: config.turnLlmTimeoutMs, structuredTimeoutMs: config.debriefTimeoutMs });
         primaryProvider = { name: "meta", llm: primaryLlm, model: turnModel };
       }
       // Hedge turn calls on the other provider only when both keys exist.
@@ -72,8 +72,8 @@ wss.on("connection", (ws: WebSocket) => {
       if (config.MODEL_API_KEY && config.BASETEN_API_KEY) {
         hedgeProvider =
           primaryProvider.name === "meta"
-            ? { name: "baseten", llm: new BasetenLlm({ apiKey: config.BASETEN_API_KEY }), model: BASETEN_DEFAULT_MODEL }
-            : { name: "meta", llm: new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel }), model: config.llmChatModel };
+            ? { name: "baseten", llm: new BasetenLlm({ apiKey: config.BASETEN_API_KEY, chatTimeoutMs: config.turnLlmTimeoutMs }), model: BASETEN_DEFAULT_MODEL }
+            : { name: "meta", llm: new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel, chatTimeoutMs: config.turnLlmTimeoutMs, structuredTimeoutMs: config.debriefTimeoutMs }), model: config.llmChatModel };
       }
       const llm: Llm = new HedgedLlm({
         primary: primaryProvider,
@@ -90,9 +90,10 @@ wss.on("connection", (ws: WebSocket) => {
         stt: new MuseSpeechToText({
           apiKey: config.MODEL_API_KEY,
           log: (m) => app.log.debug(m),
+          handshakeTimeoutMs: config.sttHandshakeTimeoutMs,
         }),
         brain,
-        tts: config.ttsProvider === "elevenlabs" && config.ELEVENLABS_API_KEY ? new ElevenLabsTextToSpeech({ apiKey: config.ELEVENLABS_API_KEY, defaultVoiceId: voice.voiceId }) : new StubTextToSpeech(),
+        tts: config.ttsProvider === "elevenlabs" && config.ELEVENLABS_API_KEY ? new ElevenLabsTextToSpeech({ apiKey: config.ELEVENLABS_API_KEY, defaultVoiceId: voice.voiceId, timeoutMs: config.newsTtsTimeoutMs }) : new StubTextToSpeech(),
         ttsProvider: config.ttsProvider,
         sink,
         scenario,

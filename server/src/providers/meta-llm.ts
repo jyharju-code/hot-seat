@@ -1,4 +1,5 @@
 import { describeEmptyContent, type Llm, type LlmChatInput, type LlmChatResult, type LlmStructuredInput, type LlmUsage } from "./llm.js";
+import { DEBRIEF_TIMEOUT_MS, TURN_LLM_TIMEOUT_MS, timeoutSignal } from "./timeout.js";
 
 export interface MetaLlmOptions {
   apiKey: string;
@@ -6,6 +7,8 @@ export interface MetaLlmOptions {
   chatModel?: string;
   structuredModel?: string;
   fetchFn?: typeof fetch;
+  chatTimeoutMs?: number;
+  structuredTimeoutMs?: number;
 }
 
 interface ChatCompletionResponse {
@@ -32,6 +35,8 @@ export class MetaLlm implements Llm {
   private readonly chatModel: string;
   private readonly structuredModel: string;
   private readonly fetchFn: typeof fetch;
+  private readonly chatTimeoutMs: number;
+  private readonly structuredTimeoutMs: number;
 
   constructor(options: MetaLlmOptions) {
     if (!options.apiKey) throw new Error("MetaLlm requires an apiKey (MODEL_API_KEY)");
@@ -40,6 +45,8 @@ export class MetaLlm implements Llm {
     this.chatModel = options.chatModel ?? "muse-spark-1.3";
     this.structuredModel = options.structuredModel ?? "muse-wonder-1.0";
     this.fetchFn = options.fetchFn ?? fetch;
+    this.chatTimeoutMs = options.chatTimeoutMs ?? TURN_LLM_TIMEOUT_MS;
+    this.structuredTimeoutMs = options.structuredTimeoutMs ?? DEBRIEF_TIMEOUT_MS;
   }
 
   async chat(input: LlmChatInput): Promise<LlmChatResult> {
@@ -47,7 +54,7 @@ export class MetaLlm implements Llm {
     const res = await this.fetchFn(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
-      ...(input.signal ? { signal: input.signal } : {}),
+      signal: timeoutSignal(input.timeoutMs ?? this.chatTimeoutMs, input.signal),
       body: JSON.stringify({
         model,
         messages: input.messages,
@@ -70,7 +77,7 @@ export class MetaLlm implements Llm {
     const res = await this.fetchFn(`${this.baseUrl}/responses`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
-      ...(input.signal ? { signal: input.signal } : {}),
+      signal: timeoutSignal(input.timeoutMs ?? this.structuredTimeoutMs, input.signal),
       body: JSON.stringify({
         model,
         ...(input.system ? { instructions: input.system } : {}),

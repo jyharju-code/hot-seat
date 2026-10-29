@@ -73,7 +73,11 @@ describe("ElevenLabsTextToSpeech cancellation (brief 08 item 4)", () => {
     expect(first.done).toBe(false);
     if (iter.return) await iter.return(undefined);
     await new Promise((r) => setTimeout(r, 0));
-    expect(seenSignal).toBe(controller.signal);
+    // Brief 16b: fetch gets the session signal combined with the timeout.
+    expect(seenSignal).toBeTruthy();
+    expect(seenSignal).not.toBe(controller.signal);
+    controller.abort();
+    expect(seenSignal!.aborted).toBe(true);
     expect(readerCancelled).toBe(true);
   });
 });

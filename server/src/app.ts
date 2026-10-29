@@ -44,9 +44,10 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     (async (description, language, options) => {
       if (!config.MODEL_API_KEY) throw new Error("MODEL_API_KEY is not configured on the server");
       const director = new CrisisDirector(
-        new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: config.scenarioModel }),
+        new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: config.scenarioModel, chatTimeoutMs: config.turnLlmTimeoutMs, structuredTimeoutMs: config.scenarioTimeoutMs }),
         config.scenarioModel,
         config.scenarioReasoning,
+        config.scenarioTimeoutMs,
       );
       return director.generate(description, language, options);
     });
@@ -107,10 +108,11 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     (async (scenario, turns, language) => {
       if (!config.MODEL_API_KEY) throw new Error("MODEL_API_KEY is not configured on the server");
       const coach = new DebriefCoach(
-        new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: "muse-wonder-1.0" }),
+        new MetaLlm({ apiKey: config.MODEL_API_KEY, structuredModel: "muse-wonder-1.0", chatTimeoutMs: config.turnLlmTimeoutMs, structuredTimeoutMs: config.debriefTimeoutMs }),
         "muse-wonder-1.0",
         "medium",
         (line) => app.log.info(line),
+        config.debriefTimeoutMs,
       );
       return coach.generate(scenario, turns, language);
     });
@@ -119,7 +121,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     deps.imageGen !== undefined
       ? deps.imageGen
       : config.MODEL_API_KEY
-        ? new MetaImageGen({ apiKey: config.MODEL_API_KEY })
+        ? new MetaImageGen({ apiKey: config.MODEL_API_KEY, timeoutMs: config.imageTimeoutMs })
         : null;
 
   type FrontPageState =
@@ -173,7 +175,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     deps.tts !== undefined
       ? deps.tts
       : config.ELEVENLABS_API_KEY
-        ? new ElevenLabsTextToSpeech({ apiKey: config.ELEVENLABS_API_KEY, defaultVoiceId: NEWS_CLIP_VOICE_ID })
+        ? new ElevenLabsTextToSpeech({ apiKey: config.ELEVENLABS_API_KEY, defaultVoiceId: NEWS_CLIP_VOICE_ID, timeoutMs: config.newsTtsTimeoutMs })
         : null;
 
   type Still = { image: Uint8Array; mimeType: string };

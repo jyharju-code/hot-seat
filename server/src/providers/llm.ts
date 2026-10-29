@@ -36,6 +36,8 @@ export interface LlmChatInput {
   maxTokens?: number;
   reasoningEffort?: string;
   signal?: AbortSignal;
+  /** Per-call model-call timeout. Defaults to the provider's configured timeout. */
+  timeoutMs?: number;
 }
 
 export interface LlmChatResult {
@@ -52,6 +54,8 @@ export interface LlmStructuredInput<T> {
   maxTokens?: number;
   reasoningEffort?: string;
   signal?: AbortSignal;
+  /** Per-call model-call timeout. Defaults to the provider's configured timeout. */
+  timeoutMs?: number;
   /** Validate and parse the raw JSON value. Throw to reject it. */
   parse: (raw: unknown) => T;
 }

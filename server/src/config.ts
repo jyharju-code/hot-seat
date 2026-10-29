@@ -27,6 +27,12 @@ const envSchema = z.object({
   INTERRUPTS: z.enum(["on", "off"]).default("on"),
   /** Calibrated ASR lag subtracted when mapping partials to audio (Brief 14). */
   ASR_LAG_MS: z.coerce.number().int().nonnegative().max(60_000).default(350),
+  TURN_LLM_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(8_000),
+  SCENARIO_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(60_000),
+  DEBRIEF_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(90_000),
+  IMAGE_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(90_000),
+  NEWS_TTS_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(30_000),
+  STT_HANDSHAKE_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(20_000),
 });
 
 export const BROWSER_TTS_LABEL = "Text to speech: browser speech synthesis (on-device, not a model call)";
@@ -46,6 +52,12 @@ export type Config = z.infer<typeof envSchema> & {
   scenarioReasoning: string;
   interruptsEnabled: boolean;
   asrLagMs: number;
+  turnLlmTimeoutMs: number;
+  scenarioTimeoutMs: number;
+  debriefTimeoutMs: number;
+  imageTimeoutMs: number;
+  newsTtsTimeoutMs: number;
+  sttHandshakeTimeoutMs: number;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -74,6 +86,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     scenarioReasoning: parsed.data.SCENARIO_REASONING ?? "medium",
     interruptsEnabled: parsed.data.INTERRUPTS !== "off",
     asrLagMs: parsed.data.ASR_LAG_MS,
+    turnLlmTimeoutMs: parsed.data.TURN_LLM_TIMEOUT_MS,
+    scenarioTimeoutMs: parsed.data.SCENARIO_TIMEOUT_MS,
+    debriefTimeoutMs: parsed.data.DEBRIEF_TIMEOUT_MS,
+    imageTimeoutMs: parsed.data.IMAGE_TIMEOUT_MS,
+    newsTtsTimeoutMs: parsed.data.NEWS_TTS_TIMEOUT_MS,
+    sttHandshakeTimeoutMs: parsed.data.STT_HANDSHAKE_TIMEOUT_MS,
   };
 }
 

@@ -5,6 +5,7 @@ import tls from "node:tls";
 import WebSocket from "ws";
 import { NotImplementedError } from "./errors.js";
 import { extractWordTimings } from "../news/soundbite.js";
+import { STT_HANDSHAKE_TIMEOUT_MS } from "./timeout.js";
 
 /** Minimal HTTP CONNECT proxy agent so wss works behind HTTPS_PROXY (fetch honours it, ws does not). */
 class ConnectProxyAgent extends https.Agent {
@@ -91,6 +92,7 @@ export interface MuseSttOptions {
   /** Injectable for tests. */
   webSocketFactory?: (url: string) => WebSocket;
   log?: (msg: string) => void;
+  handshakeTimeoutMs?: number;
 }
 
 const DEFAULT_URL = "wss://api.meta.ai/v1/asr/realtime";
@@ -102,6 +104,7 @@ export class MuseSpeechToText implements SpeechToText {
   private readonly model: string;
   private readonly factory: (url: string) => WebSocket;
   private readonly log: (msg: string) => void;
+  private readonly handshakeTimeoutMs: number;
 
   constructor(options: MuseSttOptions) {
     if (!options.apiKey) throw new Error("MuseSpeechToText requires an apiKey (MODEL_API_KEY)");
@@ -110,11 +113,12 @@ export class MuseSpeechToText implements SpeechToText {
     this.model = options.model ?? "muse-voice-transcribe-1.0";
     this.factory = options.webSocketFactory ?? ((url) => { const agent = proxyAgentFor(url); return agent ? new WebSocket(url, { agent }) : new WebSocket(url); });
     this.log = options.log ?? (() => undefined);
+    this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? STT_HANDSHAKE_TIMEOUT_MS;
   }
 
   async openSession(_options?: SpeechToTextOptions): Promise<SttSession> {
     const ws = this.factory(this.url);
-    const session = new MuseSttSession(ws, this.log);
+    const session = new MuseSttSession(ws, this.log, this.handshakeTimeoutMs);
     await session.handshake({
       mode: "ENDPOINTING",
       authorization: { accessToken: this.apiKey },
@@ -154,7 +158,7 @@ class MuseSttSession implements SttSession {
   private done = false;
   private ended = false;
 
-  constructor(ws: WebSocket, log: (msg: string) => void) {
+  constructor(ws: WebSocket, log: (msg: string) => void, private readonly handshakeTimeoutMs: number = STT_HANDSHAKE_TIMEOUT_MS) {
     this.ws = ws;
     this.log = log;
     ws.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
@@ -181,7 +185,7 @@ class MuseSttSession implements SttSession {
         cleanup();
         closeSocket();
         reject(new Error("STT handshake timed out waiting for ack"));
-      }, 20_000);
+      }, this.handshakeTimeoutMs);
       const cleanup = () => {
         clearTimeout(timer);
         this.ws.off("message", onMsg);

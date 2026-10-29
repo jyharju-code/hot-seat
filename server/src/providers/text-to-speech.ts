@@ -1,4 +1,5 @@
 import { NotImplementedError } from "./errors.js";
+import { NEWS_TTS_TIMEOUT_MS, timeoutSignal } from "./timeout.js";
 
 export interface TextToSpeechOptions {
   voiceId?: string;
@@ -69,6 +70,7 @@ export interface ElevenLabsTtsOptions {
   defaultVoiceId: string;
   baseUrl?: string;
   fetchFn?: typeof fetch;
+  timeoutMs?: number;
 }
 
 /** ElevenLabs streaming TTS. Inline audio tags pass through unchanged (v4 performs them). */
@@ -77,6 +79,7 @@ export class ElevenLabsTextToSpeech implements TextToSpeech {
   private readonly defaultVoiceId: string;
   private readonly baseUrl: string;
   private readonly fetchFn: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(options: ElevenLabsTtsOptions) {
     if (!options.apiKey) throw new Error("ElevenLabsTextToSpeech requires an apiKey (ELEVENLABS_API_KEY)");
@@ -84,6 +87,7 @@ export class ElevenLabsTextToSpeech implements TextToSpeech {
     this.defaultVoiceId = options.defaultVoiceId;
     this.baseUrl = (options.baseUrl ?? "https://api.elevenlabs.io/v1").replace(/\/$/, "");
     this.fetchFn = options.fetchFn ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? NEWS_TTS_TIMEOUT_MS;
   }
 
   async *synthesize(text: string, options?: TextToSpeechOptions): AsyncIterable<Uint8Array> {
@@ -93,7 +97,7 @@ export class ElevenLabsTextToSpeech implements TextToSpeech {
       `${this.baseUrl}/text-to-speech/${voiceId}/stream?output_format=${format}`,
       {
         method: "POST",
-        ...(options?.signal ? { signal: options.signal } : {}),
+        signal: timeoutSignal(this.timeoutMs, options?.signal),
         headers: { "content-type": "application/json", "xi-api-key": this.apiKey },
         body: JSON.stringify({
           text,

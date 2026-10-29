@@ -1,10 +1,12 @@
 import { describeEmptyContent, type Llm, type LlmChatInput, type LlmChatResult, type LlmStructuredInput, type LlmUsage } from "./llm.js";
+import { TURN_LLM_TIMEOUT_MS, timeoutSignal } from "./timeout.js";
 
 export interface BasetenLlmOptions {
   apiKey: string;
   baseUrl?: string;
   chatModel?: string;
   fetchFn?: typeof fetch;
+  chatTimeoutMs?: number;
 }
 
 interface ChatCompletionResponse {
@@ -21,6 +23,7 @@ export class BasetenLlm implements Llm {
   private readonly baseUrl: string;
   private readonly chatModel: string;
   private readonly fetchFn: typeof fetch;
+  private readonly chatTimeoutMs: number;
 
   constructor(options: BasetenLlmOptions) {
     if (!options.apiKey) throw new Error("BasetenLlm requires an apiKey (BASETEN_API_KEY)");
@@ -28,6 +31,7 @@ export class BasetenLlm implements Llm {
     this.baseUrl = (options.baseUrl ?? "https://inference.baseten.co/v1").replace(/\/$/, "");
     this.chatModel = options.chatModel ?? BASETEN_DEFAULT_MODEL;
     this.fetchFn = options.fetchFn ?? fetch;
+    this.chatTimeoutMs = options.chatTimeoutMs ?? TURN_LLM_TIMEOUT_MS;
   }
 
   async chat(input: LlmChatInput): Promise<LlmChatResult> {
@@ -36,7 +40,7 @@ export class BasetenLlm implements Llm {
       this.fetchFn(`${this.baseUrl}/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Api-Key ${this.apiKey}` },
-        ...(input.signal ? { signal: input.signal } : {}),
+        signal: timeoutSignal(input.timeoutMs ?? this.chatTimeoutMs, input.signal),
         body: JSON.stringify({
           model,
           messages: input.messages,
@@ -75,6 +79,7 @@ export class BasetenLlm implements Llm {
       ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
       ...(input.reasoningEffort !== undefined ? { reasoningEffort: input.reasoningEffort } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
     });
     let parsed: unknown;
     try {
