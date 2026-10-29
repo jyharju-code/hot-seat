@@ -6,7 +6,7 @@ import type {
   HealthResponse,
   ProvidersResponse,
 } from "@hot-seat/shared";
-import { providerStatuses, type Config } from "./config.js";
+import { BROWSER_TTS_LABEL, providerStatuses, type Config } from "./config.js";
 import { buildHtmlFrontPage, DebriefCoach, generateFrontPage, type DebriefGenerator } from "./debrief.js";
 import { classifyImageError, MetaImageGen, type ImageGen } from "./providers/image-gen.js";
 import { FRONT_PAGE_STEPS, type FrontPageStep } from "@hot-seat/shared";
@@ -15,7 +15,7 @@ import { CrisisDirector, type ScenarioGenerator } from "./scenarios/director.js"
 import { presets, profilePresets } from "./scenarios/presets.js";
 import { ScenarioStore } from "./scenarios/store.js";
 import { SessionStore } from "./session/store.js";
-import { buildNewsClipAudio, NEWS_CLIP_VOICE_ID } from "./news/build-clip.js";
+import { buildBrowserNewsClip, buildNewsClipAudio, NEWS_CLIP_VOICE_ID } from "./news/build-clip.js";
 import { STUDIO_IMAGE_PROMPT } from "./news/clip.js";
 import type { NewsTimelinePart } from "@hot-seat/shared";
 import { ElevenLabsTextToSpeech, type TextToSpeech } from "./providers/text-to-speech.js";
@@ -55,6 +55,8 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     status: "ok",
     service: "hot-seat-server",
     version: SERVER_VERSION,
+    tts: config.ttsProvider === "browser" ? BROWSER_TTS_LABEL : "Text to speech: ElevenLabs eleven_v4",
+    ttsProvider: config.ttsProvider,
   }));
 
   app.get("/api/providers", async (): Promise<ProvidersResponse> => ({
@@ -188,6 +190,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
         buildMs: number;
         studio: { image: Uint8Array; mimeType: string } | null;
         still: Still | null;
+        ttsMode?: "browser" | "elevenlabs";
       }
     | { status: "failed"; reason: string };
   const newsClips = new Map<string, NewsClipState>();
@@ -226,7 +229,8 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     if (!news) return;
     if (newsClips.has(sessionId)) return;
     if (still) stills.set(sessionId, still);
-    if (!newsTts) {
+    const browserClip = config.ttsProvider === "browser" && deps.tts === undefined;
+    if (!browserClip && !newsTts) {
       newsClips.set(sessionId, { status: "failed", reason: "news TTS is not configured" });
       app.log.info("[news-clip] skipped: TTS is not configured");
       return;
@@ -237,14 +241,16 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       try {
         const buffer = ownerAudioRegistry.get(sessionId);
         const [built, studio] = await Promise.all([
-          buildNewsClipAudio({
-            news,
-            buffer,
-            turns,
-            tts: newsTts,
-            ...(deps.newsVoiceId ? { voiceId: deps.newsVoiceId } : {}),
-            log: (line) => app.log.info(line),
-          }),
+          browserClip
+            ? Promise.resolve(buildBrowserNewsClip({ news, buffer, turns, log: (line) => app.log.info(line) }))
+            : buildNewsClipAudio({
+                news,
+                buffer,
+                turns,
+                tts: newsTts!,
+                ...(deps.newsVoiceId ? { voiceId: deps.newsVoiceId } : {}),
+                log: (line) => app.log.info(line),
+              }),
           getStudioImage(),
         ]);
         const buildMs = Math.round(performance.now() - started);
@@ -265,6 +271,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
           buildMs,
           studio,
           still: stills.get(sessionId) ?? still,
+          ttsMode: browserClip ? "browser" : "elevenlabs",
         });
       } catch (err) {
         const buildMs = Math.round(performance.now() - started);
@@ -291,6 +298,10 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
     if (entry.status === "failed") return reply.code(502).send({ error: "News clip could not be built." });
     return {
       audioUrl: `/api/sessions/${sessionId}/news-clip/audio`,
+      ttsMode: entry.ttsMode ?? "elevenlabs",
+      anchorIntro: news.anchor_intro,
+      anchorOutro: news.anchor_outro,
+      soundbiteAudioUrl: entry.ttsMode === "browser" ? `/api/sessions/${sessionId}/news-clip/soundbite-audio` : null,
       timeline: entry.timeline,
       studioImageUrl: entry.studio ? `/api/sessions/${sessionId}/news-clip/studio-image` : null,
       studioFallback: !entry.studio,
@@ -305,6 +316,12 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
   });
 
   app.get<{ Params: { id: string } }>("/api/sessions/:id/news-clip/audio", async (request, reply) => {
+    const entry = newsClips.get(request.params.id);
+    if (!entry || entry.status !== "ready") return reply.code(404).send({ error: "News clip audio is not ready." });
+    return reply.type("audio/wav").send(Buffer.from(entry.wav));
+  });
+
+  app.get<{ Params: { id: string } }>("/api/sessions/:id/news-clip/soundbite-audio", async (request, reply) => {
     const entry = newsClips.get(request.params.id);
     if (!entry || entry.status !== "ready") return reply.code(404).send({ error: "News clip audio is not ready." });
     return reply.type("audio/wav").send(Buffer.from(entry.wav));

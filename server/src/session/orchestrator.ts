@@ -1,4 +1,4 @@
-import { CONNECTION_HICCUP_MESSAGE, isProfileScenario, isSessionComplete, sessionDurationSeconds, stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming } from "@hot-seat/shared";
+import { CONNECTION_HICCUP_MESSAGE, isProfileScenario, isSessionComplete, sessionDurationSeconds, stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming, type TtsProvider, type VoiceHint } from "@hot-seat/shared";
 import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
 import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
@@ -37,6 +37,8 @@ export interface OrchestratorDeps {
     readonly lastRaceWinner?: "meta" | "baseten" | null;
   };
   tts: TextToSpeech;
+  /** Browser (default in product) skips all server TTS. Absent = legacy ElevenLabs path (tests). */
+  ttsProvider?: TtsProvider;
   sink: ClientSink;
   scenario: BrainScenario;
   voiceId: string;
@@ -362,6 +364,17 @@ export class SessionOrchestrator {
     }
     // State stays "speaking" until the browser has really played the audio.
     this.awaitingPlayback = true;
+  }
+
+  private get isBrowserTts(): boolean { return this.deps.ttsProvider === "browser"; }
+  private reporterHint(): VoiceHint {
+    if (isGenerated(this.deps.scenario)) { const j = primaryJournalist(this.deps.scenario); return { role: "reporter", temperament: j.temperament, gender: j.voice }; }
+    return { role: "reporter", temperament: "relentless", gender: "male" };
+  }
+  private radioHint(): VoiceHint { return { role: "radio" }; }
+  /** Client-reported first-sound latency in browser mode. */
+  speechStarted(speechStartMs?: number): void {
+    this.log(`[timing] speech_started speechStartMs=${speechStartMs !== undefined ? Math.round(speechStartMs) : "unknown"}`);
   }
 
   /** Client finished playing the reporter audio: only now open STT. */
@@ -834,7 +847,7 @@ export class SessionOrchestrator {
         spec.raceWinner = this.deps.brain.lastRaceWinner ?? null;
         spec.ownerDone = line.owner_done ?? null;
         if (this.speculative !== spec || this.stopped) return;
-        if (line.owner_done === true) {
+        if (line.owner_done === true && !this.isBrowserTts) {
           try {
             spec.ttsBuffer = SpeculativeTtsBuffer.start(this.deps.tts, line.say, {
               voiceId: this.deps.voiceId,
@@ -926,6 +939,7 @@ export class SessionOrchestrator {
   /** Stream the news flash in the radio voice. No audio_end: the reporter follows. */
   private async speakNews(text: string): Promise<void> {
     this.setState("speaking");
+    if (this.isBrowserTts) return; // client speaks news_flash from its voiceHint
     try {
       await this.streamTts(text, { voiceId: this.deps.newsVoiceId ?? NEWS_VOICE_ID, model: this.deps.newsTtsModel ?? NEWS_TTS_MODEL }, (chunk) => this.deps.sink.sendAudio(chunk));
     } catch (err) {
@@ -953,7 +967,7 @@ export class SessionOrchestrator {
       flags: [],
       interruptReason: req.reason || "interrupted",
     });
-    this.deps.sink.send({ type: "interrupt", say: req.say });
+    this.deps.sink.send({ type: "interrupt", say: req.say, ...(this.isBrowserTts ? { voiceHint: this.reporterHint() } : {}) });
     this.deps.sink.send({ type: "transcript", role: "reporter", text: stripAudioTags(req.say) });
     this.history.push({ role: "reporter", text: req.say });
     this.deps.record?.turns.push({
@@ -964,6 +978,7 @@ export class SessionOrchestrator {
     });
     this.setState("speaking");
     let firstAudioAt: number | null = null;
+    if (this.isBrowserTts) { this.deps.sink.send({ type: "audio_end" }); if (!this.stopped) this.awaitingPlayback = true; return; }
     try {
       await this.streamTts(req.say, { voiceId: this.deps.voiceId, model: INTERRUPT_TTS_MODEL }, (chunk) => {
         if (firstAudioAt === null) {
@@ -1034,6 +1049,7 @@ export class SessionOrchestrator {
           type: "news_flash",
           text: escalation.news_flash,
           atSeconds: this.elapsedSeconds(),
+          ...(this.isBrowserTts ? { voiceHint: this.radioHint() } : {}),
         });
         await this.speakNews(escalation.news_flash);
         if (this.stopped) return;
@@ -1135,9 +1151,14 @@ export class SessionOrchestrator {
     const displayLine: ReporterLine = { ...line };
     delete displayLine.quote_harvest;
     delete displayLine.angle;
-    this.deps.sink.send({ type: "reporter_line", line: displayLine });
+    this.deps.sink.send({ type: "reporter_line", line: displayLine, ...(this.isBrowserTts ? { voiceHint: this.reporterHint() } : {}) });
     this.deps.sink.send({ type: "transcript", role: "reporter", text: stripAudioTags(line.say) });
     this.setState("speaking");
+    if (this.isBrowserTts) {
+      const sentAt = this.now();
+      this.deps.sink.send({ type: "audio_end" });
+      return { turn: this.turnIndex, speechEndToFinalMs: Math.max(0, finalAt - speechEndAt), speechEndToLlmMs: Math.max(0, llmAt - speechEndAt), speechEndToFirstAudioMs: Math.max(0, sentAt - speechEndAt), totalToFirstAudioMs: Math.max(0, sentAt - speechEndAt), speculativeTtsUsed: false, partialStartUsed, raceWinner };
+    }
     let firstAudioAt: number | null = null;
     const onChunk = (chunk: Uint8Array) => {
       if (firstAudioAt === null) firstAudioAt = this.now();

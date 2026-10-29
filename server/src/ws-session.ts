@@ -7,6 +7,7 @@ export interface OrchestratorLike {
   start(): Promise<void>;
   stop(): Promise<void>;
   playbackDone(): Promise<void>;
+  speechStarted?(speechStartMs?: number): void;
   pushAudio(pcm: Uint8Array): void;
 }
 
@@ -111,6 +112,8 @@ export function attachSessionSocket(ws: SessionSocket, deps: SessionSocketDeps):
       })();
     } else if (msg.data.type === "playback_done") {
       void orchestrator?.playbackDone();
+    } else if (msg.data.type === "speech_started") {
+      orchestrator?.speechStarted?.(msg.data.speechStartMs);
     } else if (msg.data.type === "stop") {
       startSeq += 1;
       const current = orchestrator;

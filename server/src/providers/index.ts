@@ -15,6 +15,9 @@ export {
 export {
   ElevenLabsTextToSpeech,
   StubTextToSpeech,
+  assertElevenLabsAllowed,
+  guardedFetch,
+  isElevenLabsUrl,
   type TextToSpeech,
   type TextToSpeechOptions,
 } from "./text-to-speech.js";

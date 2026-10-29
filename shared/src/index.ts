@@ -21,6 +21,9 @@ export interface HealthResponse {
   status: "ok";
   service: "hot-seat-server";
   version: string;
+  /** Active TTS path, e.g. browser label. Optional for old servers. */
+  tts?: string;
+  ttsProvider?: "browser" | "elevenlabs";
 }
 
 /** A fictional crisis scenario built before a rehearsal starts. */
@@ -87,6 +90,19 @@ export const CONNECTION_HICCUP_MESSAGE = "Connection hiccup, carrying on.";
 export const sessionStateSchema = z.enum(["listening", "thinking", "speaking"]);
 export type SessionState = z.infer<typeof sessionStateSchema>;
 
+export const ttsProviderSchema = z.enum(["browser", "elevenlabs"]);
+export type TtsProvider = z.infer<typeof ttsProviderSchema>;
+
+export const voiceRoleSchema = z.enum(["reporter", "radio", "anchor"]);
+export type VoiceRoleHint = z.infer<typeof voiceRoleSchema>;
+
+export const voiceHintSchema = z.object({
+  role: voiceRoleSchema,
+  temperament: z.enum(["relentless", "precise", "human"]).optional(),
+  gender: z.enum(["female", "male"]).optional(),
+});
+export type VoiceHint = z.infer<typeof voiceHintSchema>;
+
 export const clientMessageSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("start"),
@@ -95,6 +111,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
     escalationScale: z.number().positive().finite().optional(),
   }),
   z.object({ type: z.literal("playback_done") }),
+  z.object({ type: z.literal("speech_started"), speechStartMs: z.number().nonnegative().optional() }),
   z.object({ type: z.literal("stop") }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
@@ -115,6 +132,8 @@ export const turnTimingSchema = z.object({
   partialStartUsed: z.boolean().default(false),
   /** Provider that won the turn race, or null when not raced. */
   raceWinner: z.enum(["meta", "baseten"]).nullable().default(null),
+  /** Client-reported ms from line sent to first speech sound (browser TTS). */
+  speechStartMs: z.number().nonnegative().optional(),
 });
 export type TurnTiming = z.infer<typeof turnTimingSchema>;
 
@@ -127,9 +146,9 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     role: z.enum(["user", "reporter", "news"]),
     text: z.string(),
   }),
-  z.object({ type: z.literal("news_flash"), text: z.string(), atSeconds: z.number().nonnegative() }),
-  z.object({ type: z.literal("interrupt"), say: z.string() }),
-  z.object({ type: z.literal("reporter_line"), line: reporterLineSchema }),
+  z.object({ type: z.literal("news_flash"), text: z.string(), atSeconds: z.number().nonnegative(), voiceHint: voiceHintSchema.optional() }),
+  z.object({ type: z.literal("interrupt"), say: z.string(), voiceHint: voiceHintSchema.optional() }),
+  z.object({ type: z.literal("reporter_line"), line: reporterLineSchema, voiceHint: voiceHintSchema.optional() }),
   z.object({ type: z.literal("session_complete"), message: z.string() }),
   z.object({ type: z.literal("audio_end") }),
   z.object({ type: z.literal("timing"), timing: turnTimingSchema }),
@@ -335,6 +354,12 @@ export interface NewsTimelinePart {
 /** Response of GET /api/sessions/:sessionId/news-clip when ready. */
 export interface NewsClipResponse {
   audioUrl: string;
+  /** Browser mode: no anchor audio; player speaks anchor lines. */
+  ttsMode?: "browser" | "elevenlabs";
+  anchorIntro?: string;
+  anchorOutro?: string;
+  /** Browser mode: WAV containing only the owner's soundbite. */
+  soundbiteAudioUrl?: string | null;
   timeline: NewsTimelinePart[];
   studioImageUrl: string | null;
   /** True when the studio image failed and the client shows a plain CSS studio. */
@@ -416,6 +441,22 @@ export interface DebriefResponse {
 export function formatMmSs(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Estimated spoken duration at about 2.6 words per second (sim / browser timing). */
+export function estimatedSpeechMs(text: string): number {
+  const words = stripAudioTags(text).split(/\s+/).filter(Boolean).length;
+  return Math.round((words / 2.6) * 1000);
+}
+
+/** Small rate/pitch tweak for a leading audio tag, for browser speech. */
+export function tagProsody(text: string): { rate: number; pitch: number } {
+  const m = /\[([^\]]+)\]/.exec(text);
+  const tag = (m?.[1] ?? "").toLowerCase();
+  if (/sharp|impatient|pressing|urgent/.test(tag)) return { rate: 1.08, pitch: 1.05 };
+  if (/warm|calm|soft|gentle/.test(tag)) return { rate: 0.94, pitch: 0.95 };
+  if (/hesitat|pause|sigh/.test(tag)) return { rate: 0.9, pitch: 0.95 };
+  return { rate: 1, pitch: 1 };
 }
 
 /** Strip ElevenLabs audio tags (e.g. `[sharply]`) for display. TTS keeps the raw text. */

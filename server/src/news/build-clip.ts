@@ -1,12 +1,13 @@
-import type { DebriefNews, NewsTimelinePart } from "@hot-seat/shared";
+import { estimatedSpeechMs, type DebriefNews, type NewsTimelinePart } from "@hot-seat/shared";
 import type { TextToSpeech } from "../providers/text-to-speech.js";
 import type { OwnerAudioBuffer } from "../session/owner-audio.js";
 import type { TimedTurn } from "../session/store.js";
-import { assembleClip, collectTts, CLIP_SAMPLE_RATE } from "./clip.js";
+import { assembleClip, buildTimeline, collectTts, encodeWav, CLIP_SAMPLE_RATE } from "./clip.js";
 import {
   computeCut,
   extractPcmSegment,
   fuzzyFindQuote,
+  pcmDurationMs,
   resamplePcm16,
   snapCut,
   type Cut,
@@ -102,4 +103,22 @@ export async function buildNewsClipAudio(opts: {
     reason: location.located ? null : location.reason,
     cut: location.located ? location.cut : null,
   };
+}
+
+/** Browser mode: only the owner's soundbite as WAV; anchor parts are timed by estimate and spoken by the client. */
+export function buildBrowserNewsClip(opts: {
+  news: DebriefNews;
+  buffer: OwnerAudioBuffer | undefined | null;
+  turns: readonly TimedTurn[];
+  log?: (line: string) => void;
+}): BuiltNewsClip {
+  const location = locateSoundbite(opts.buffer, opts.turns, opts.news);
+  if (!location.located) opts.log?.(`[news-clip] soundbite not located: ${location.reason}`);
+  const pcm = location.located ? resamplePcm16(location.segmentPcm16, 16000, CLIP_SAMPLE_RATE) : new Uint8Array(0);
+  const timeline = buildTimeline([
+    { part: "intro", text: opts.news.anchor_intro, durationMs: estimatedSpeechMs(opts.news.anchor_intro) },
+    { part: "soundbite", text: opts.news.soundbite, durationMs: pcmDurationMs(pcm.length, CLIP_SAMPLE_RATE) },
+    { part: "outro", text: opts.news.anchor_outro, durationMs: estimatedSpeechMs(opts.news.anchor_outro) },
+  ]);
+  return { wav: encodeWav(pcm, CLIP_SAMPLE_RATE), timeline, soundbiteLocated: location.located, reason: location.located ? null : location.reason, cut: location.located ? location.cut : null };
 }

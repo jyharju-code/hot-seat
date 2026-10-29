@@ -41,16 +41,20 @@ describe("config", () => {
   it("/api/providers shows the turn provider in use", () => {
     const meta = providerStatuses(loadConfig({ MODEL_API_KEY: "x" }));
     expect(meta.find((p) => p.id === "llm")?.adapter).toContain("Meta");
-    const baseten = providerStatuses(loadConfig({ TURN_LLM: "baseten", BASETEN_API_KEY: "y" }));
+    const baseten = providerStatuses(loadConfig({ TURN_LLM: "baseten", BASETEN_API_KEY: "y-secret" }));
     expect(baseten.find((p) => p.id === "llm")?.adapter).toContain("Baseten");
     expect(baseten.find((p) => p.id === "llm")?.configured).toBe(true);
-    expect(JSON.stringify(baseten)).not.toContain("y");
+    expect(JSON.stringify(baseten)).not.toContain("y-secret");
   });
   it("provider statuses never expose secrets", () => {
     const s = providerStatuses(loadConfig({ MODEL_API_KEY: "secret-value" }));
     expect(JSON.stringify(s)).not.toContain("secret-value");
     expect(s.find((p) => p.id === "llm")?.configured).toBe(true);
-    expect(s.find((p) => p.id === "text-to-speech")?.configured).toBe(false);
+    // Browser TTS is always available (on-device, not a model call).
+    expect(s.find((p) => p.id === "text-to-speech")?.configured).toBe(true);
+    // TTS_PROVIDER=elevenlabs without a key falls back to browser (configured).
+    const eleven = providerStatuses(loadConfig({ TTS_PROVIDER: "elevenlabs" }));
+    expect(eleven.find((p) => p.id === "text-to-speech")?.adapter).toBe("Browser speech synthesis");
   });
 });
 

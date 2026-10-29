@@ -10,7 +10,8 @@ import { loadConfig } from "./config.js";
 import { JournalistBrain, loadJournalistPrompts, primaryJournalist } from "./journalist.js";
 import { LlmInterruptDecider } from "./interrupt.js";
 import { loadPrompt } from "./prompts.js";
-import { BASETEN_DEFAULT_MODEL, BasetenLlm, ElevenLabsTextToSpeech, HedgedLlm, MetaLlm, MuseSpeechToText, type HedgedProvider, type Llm } from "./providers/index.js";
+import { BASETEN_DEFAULT_MODEL, BasetenLlm, ElevenLabsTextToSpeech, HedgedLlm, MetaLlm, MuseSpeechToText, StubTextToSpeech, type HedgedProvider, type Llm } from "./providers/index.js";
+import { BROWSER_TTS_LABEL } from "./config.js";
 import { requireScenario, ScenarioStore, SCENARIO_EXPIRED_MESSAGE } from "./scenarios/store.js";
 import { SessionOrchestrator } from "./session/orchestrator.js";
 import { SessionStore } from "./session/store.js";
@@ -28,6 +29,8 @@ console.log(
     `SONIOX_API_KEY ${config.SONIOX_API_KEY ? "present" : "missing"}, ` +
     `BASETEN_API_KEY ${config.BASETEN_API_KEY ? "present" : "missing"}`,
 );
+if (config.ttsFallbackReason) console.log(`[config] ${config.ttsFallbackReason}`);
+console.log(`[config] ${config.ttsProvider === "browser" ? BROWSER_TTS_LABEL : "Text to speech: ElevenLabs eleven_v4"}`);
 
 const wss = new WebSocketServer({ noServer: true });
 app.server.on("upgrade", (request, socket, head) => {
@@ -48,7 +51,7 @@ wss.on("connection", (ws: WebSocket) => {
     build: async (scenarioId, escalationScaleRaw, sink) => {
       const escalationScale = config.NODE_ENV !== "production" ? escalationScaleRaw : undefined;
       if (!config.MODEL_API_KEY) throw new Error("MODEL_API_KEY is not configured on the server");
-      if (!config.ELEVENLABS_API_KEY) throw new Error("ELEVENLABS_API_KEY is not configured on the server");
+      if (config.ttsProvider === "elevenlabs" && !config.ELEVENLABS_API_KEY) throw new Error("ELEVENLABS_API_KEY is not configured on the server");
       const scenario = requireScenario(scenarioStore, scenarioId);
       const journalist = primaryJournalist(scenario);
       const prompts = await loadJournalistPrompts();
@@ -89,7 +92,8 @@ wss.on("connection", (ws: WebSocket) => {
           log: (m) => app.log.debug(m),
         }),
         brain,
-        tts: new ElevenLabsTextToSpeech({ apiKey: config.ELEVENLABS_API_KEY, defaultVoiceId: voice.voiceId }),
+        tts: config.ttsProvider === "elevenlabs" && config.ELEVENLABS_API_KEY ? new ElevenLabsTextToSpeech({ apiKey: config.ELEVENLABS_API_KEY, defaultVoiceId: voice.voiceId }) : new StubTextToSpeech(),
+        ttsProvider: config.ttsProvider,
         sink,
         scenario,
         record,

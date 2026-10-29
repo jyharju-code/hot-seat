@@ -12,6 +12,7 @@ const envSchema = z.object({
   BASETEN_API_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   LLM_CHAT_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
   LLM_STRUCTURED_MODEL: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  TTS_PROVIDER: z.enum(["browser", "elevenlabs"]).default("browser"),
   TURN_LLM: z.enum(["meta", "baseten"]).default("meta"),
   TURN_RACE: z.enum(["on", "off"]).default("on"),
   HEDGE_AFTER_MS: z.coerce.number().int().nonnegative().max(60_000).default(1800),
@@ -28,7 +29,12 @@ const envSchema = z.object({
   ASR_LAG_MS: z.coerce.number().int().nonnegative().max(60_000).default(350),
 });
 
+export const BROWSER_TTS_LABEL = "Text to speech: browser speech synthesis (on-device, not a model call)";
+
 export type Config = z.infer<typeof envSchema> & {
+  /** Effective TTS provider after fallback. */
+  ttsProvider: "browser" | "elevenlabs";
+  ttsFallbackReason: string | null;
   dataDir: string;
   llmChatModel: string;
   llmStructuredModel: string;
@@ -48,8 +54,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "env"}: ${i.message}`).join("; ");
     throw new Error(`Invalid configuration: ${issues}`);
   }
+  const wantsEleven = parsed.data.TTS_PROVIDER === "elevenlabs";
+  const ttsProvider: "browser" | "elevenlabs" = wantsEleven && parsed.data.ELEVENLABS_API_KEY ? "elevenlabs" : "browser";
+  const ttsFallbackReason = wantsEleven && !parsed.data.ELEVENLABS_API_KEY
+    ? "TTS_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is missing; falling back to browser speech synthesis"
+    : null;
   return {
     ...parsed.data,
+    ttsProvider,
+    ttsFallbackReason,
     dataDir: parsed.data.DATA_DIR,
     llmChatModel: parsed.data.LLM_CHAT_MODEL ?? "muse-spark-1.3",
     llmStructuredModel: parsed.data.LLM_STRUCTURED_MODEL ?? "muse-wonder-1.0",
@@ -74,7 +87,9 @@ export function providerStatuses(config: Config) {
       configured: turnIsBaseten ? Boolean(config.BASETEN_API_KEY) : Boolean(config.MODEL_API_KEY),
     },
     { id: "speech-to-text" as const, label: "Speech to text (Muse Voice Transcribe)", adapter: "Meta Muse Voice Transcribe", configured: Boolean(config.MODEL_API_KEY) },
-    { id: "text-to-speech" as const, label: "Text to speech (ElevenLabs)", adapter: "ElevenLabs eleven_v4", configured: Boolean(config.ELEVENLABS_API_KEY) },
+    config.ttsProvider === "browser"
+      ? { id: "text-to-speech" as const, label: BROWSER_TTS_LABEL, adapter: "Browser speech synthesis", configured: true }
+      : { id: "text-to-speech" as const, label: "Text to speech (ElevenLabs)", adapter: "ElevenLabs eleven_v4", configured: Boolean(config.ELEVENLABS_API_KEY) },
     { id: "image-gen" as const, label: "Image (Muse Image)", adapter: "Meta Muse Image", configured: Boolean(config.MODEL_API_KEY) },
   ];
 }

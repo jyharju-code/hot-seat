@@ -49,6 +49,21 @@ export async function* rechunkPcm16(
   if (pending.length >= 2) yield pending.slice(0, pending.length - (pending.length % 2));
 }
 
+/** Guard: in browser mode no code path may call ElevenLabs. */
+export function isElevenLabsUrl(url: string): boolean {
+  try { return new URL(url).hostname === "api.elevenlabs.io"; } catch { return url.includes("api.elevenlabs.io"); }
+}
+export function assertElevenLabsAllowed(provider: "browser" | "elevenlabs" | undefined, url: string): void {
+  if (provider === "browser" && isElevenLabsUrl(url)) throw new Error("ElevenLabs call blocked in browser TTS mode");
+}
+export function guardedFetch(provider: "browser" | "elevenlabs" | undefined, fetchFn: typeof fetch = fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as { url: string }).url;
+    assertElevenLabsAllowed(provider, url);
+    return fetchFn(input, init);
+  }) as typeof fetch;
+}
+
 export interface ElevenLabsTtsOptions {
   apiKey: string;
   defaultVoiceId: string;
