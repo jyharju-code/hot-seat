@@ -1,6 +1,6 @@
 import { CONNECTION_HICCUP_MESSAGE, PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE, PROFILE_WRAP_UP_SECONDS, isProfileScenario, isSessionComplete, sessionDurationSeconds, shouldWrapUp, isWrapUpLine, stripAudioTags, stripTranscriptTokens, type Escalation, type InterviewPlan, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming, type TtsProvider, type VoiceHint } from "@hot-seat/shared";
 import type { InterviewTurnContext } from "../journalist.js";
-import { applyCommittedLine, beatState, buildFallbackPlan, computeDirective, createInterviewState, isAlreadyAsked, isClosedStatus, minQuestionsForBeat, nextFallbackLine, snapshotState, type Directive, type InterviewState } from "./interview-state.js";
+import { activeBeat, applyCommittedLine, applyInterruptLine, beatState, buildFallbackPlan, canInterruptBeat, computeDirective, createInterviewState, isAlreadyAsked, isClosedStatus, isRepeatLine, landmineFacts, minQuestionsForBeat, nextFallbackLine, snapshotState, type Directive, type InterviewState } from "./interview-state.js";
 import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
 import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
@@ -717,6 +717,9 @@ export class SessionOrchestrator {
       if (this.isProfile) return;
       const decider = this.deps.interruptDecider;
       if (!decider || !(this.deps.interruptsEnabled ?? true) || this.lastAnswerInterrupted) return;
+      // Brief 18b: at most one interrupt per beat, and never on a spent beat.
+      const beatNow = this.interviewState ? activeBeat(this.interviewState, this.elapsedSeconds()) : null;
+      if (this.interviewState && beatNow && !canInterruptBeat(this.interviewState, beatNow.id)) return;
       if (this.stopped || interruptReq || decisionInFlight || answerStartedAt === null) return;
       const nowMs = this.now();
       if (nowMs - answerStartedAt < (this.deps.interruptAfterMs ?? INTERRUPT_AFTER_MS)) return;
@@ -741,6 +744,9 @@ export class SessionOrchestrator {
             seconds: (started - (answerStartedAt ?? started)) / 1000,
             partial: snapshot,
             facts: persona.facts,
+            // Brief 18b: the cut-in presses on the live topic in a new way.
+            ...(beatNow ? { beatGoal: `${beatNow.id}: ${beatNow.goal}` } : {}),
+            ...(this.interviewState ? { asked: [...this.interviewState.asked] } : {}),
           }, this.signal);
           const latencyMs = this.now() - started;
           this.log(`[interrupt] decision latency ${Math.round(latencyMs)}ms interrupt=${decision.interrupt}`);
@@ -1019,6 +1025,10 @@ export class SessionOrchestrator {
       closedBeatIds: state.beats.filter((b) => isClosedStatus(b.status)).map((b) => b.beat.id),
       callbackBeatId: this.lastCallbackBeatId,
       fallbackLine,
+      // Brief 18b: text-based repeat guard inputs for the brain.
+      askedBeats: [...state.servedBeats],
+      spentBeatIds: state.beats.filter((b) => isClosedStatus(b.status) || b.questions >= b.beat.max_questions).map((b) => b.beat.id),
+      landmineFacts: landmineFacts(state),
     };
   }
 
@@ -1302,6 +1312,12 @@ export class SessionOrchestrator {
       elapsedSeconds: this.elapsedSeconds(),
       flags: [],
     });
+    // Brief 18b: the spoken cut-in counts as one question on its beat, so the
+    // next directive treats that beat as one closer to its limit.
+    if (this.interviewState) {
+      applyInterruptLine(this.interviewState, req.say, { turn: this.turnIndex, elapsedSeconds: this.elapsedSeconds() });
+      this.syncInterviewRecord();
+    }
     this.setState("speaking");
     let firstAudioAt: number | null = null;
     if (this.isBrowserTts) { this.deps.sink.send({ type: "audio_end" }); if (!this.stopped) this.awaitingPlayback = true; return; }
@@ -1473,9 +1489,12 @@ export class SessionOrchestrator {
       const closeBeatId = this.interviewState.beats.find((b) => b.beat.kind === "close")?.beat.id;
       const goodbyeEarly = closeLocked && (isThankYouOrGoodbyeLine(line.say) || isWrapUpLine(line.say) || (line.beat_id != null && line.beat_id === closeBeatId));
       const textRepeat = isAlreadyAsked(this.interviewState.asked, line.say);
+      // Brief 18b: a line whose text serves a spent beat is a repeat even
+      // when the model labelled it with another beat.
+      const beatRepeat = isRepeatLine(this.interviewState, line);
       const nonCloseOpen = this.interviewState.beats.some((b) => b.beat.kind !== "close" && !isClosedStatus(b.status));
       const planExhausted = !this.isProfile && !nonCloseOpen && line.beat_id !== closeBeatId;
-      if (goodbyeEarly || textRepeat || planExhausted) {
+      if (goodbyeEarly || textRepeat || beatRepeat || planExhausted) {
         line = this.interviewContext()?.fallbackLine ?? line;
       }
     }

@@ -6,6 +6,8 @@ import type { SpeechToText, SttEvent, SttSession } from "../src/providers/speech
 import type { TextToSpeech } from "../src/providers/text-to-speech.js";
 import { cafeScenario, cafeTestScenario } from "../src/scenarios/cafe.js";
 import { SessionOrchestrator, type ClientSink } from "../src/session/orchestrator.js";
+import { buildFallbackPlan } from "../src/session/interview-state.js";
+import type { InterviewPlan } from "@hot-seat/shared";
 import { formatEvents, type SessionRecord } from "../src/session/store.js";
 import { isInterruptDecisionStale, LlmInterruptDecider, parseInterruptDecision, type InterruptDecision, type InterruptDecisionInput } from "../src/interrupt.js";
 
@@ -1148,7 +1150,7 @@ describe("Interruptions (brief 07)", () => {
   const NO: InterruptDecision = { interrupt: false, reason: "", say: "" };
   const YES: InterruptDecision = { interrupt: true, reason: "repeating a scripted line", say: "[interrupting] Sorry, when did you know?" };
 
-  async function startedInterrupt(decider: FakeDecider, opts: { enabled?: boolean } = {}) {
+  async function startedInterrupt(decider: FakeDecider, opts: { enabled?: boolean; plan?: InterviewPlan } = {}) {
     const stt = new FakeStt();
     const tts = new FakeTts();
     const { messages, audio, sink } = makeSink();
@@ -1160,6 +1162,7 @@ describe("Interruptions (brief 07)", () => {
       stt, brain: brain as never, tts, sink, scenario: cafeScenario, voiceId: "voice-1",
       turnEndSilenceMs: 20, turnEndHesitantMs: 20, now: () => nowMs, log: (l) => logs.push(l), record,
       interruptDecider: decider, interruptsEnabled: opts.enabled ?? true,
+      ...(opts.plan ? { interviewPlanProvider: async () => opts.plan! } : {}),
     });
     await orch.start();
     await orch.playbackDone();
@@ -1347,6 +1350,41 @@ describe("Interruptions (brief 07)", () => {
     await ticks(12);
     expect(decider.calls.length).toBeGreaterThanOrEqual(2);
     expect(h.messages.filter((m) => m.type === "interrupt")).toHaveLength(2);
+    await h.orch.stop();
+  });
+
+  it("brief 18b: the decider gets the beat goal and asked lines, and is not asked twice on one beat", async () => {
+    const plan = buildFallbackPlan(cafeTestScenario);
+    // Test-only headroom so facts survives opening + interrupt + reply.
+    (plan.beats[0] as { max_questions: number }).max_questions = 5;
+    const decider = new FakeDecider(() => YES);
+    const h = await startedInterrupt(decider, { plan });
+    // Answer 1: interrupted on facts.
+    let s = h.session();
+    h.setNow(0); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(9000); s.emit({ type: "partial", text: "We take this very seriously, we take this very seriously" });
+    await ticks(12);
+    expect(h.messages.filter((m) => m.type === "interrupt")).toHaveLength(1);
+    expect(decider.calls).toHaveLength(1);
+    expect(decider.calls[0]!.beatGoal).toContain("facts");
+    expect(decider.calls[0]!.asked?.join("\n")).toContain("When did the display case break?");
+    await h.orch.playbackDone(); await ticks();
+    // Answer 2: a normal turn that stays on facts (still below max).
+    s = h.session();
+    h.setNow(20000); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(21000); s.emit({ type: "partial", text: "We take this next answer slowly" }); await ticks();
+    s.emit({ type: "endpoint" });
+    s.emit({ type: "final", text: "We fixed it that morning.", turnId: "t2" });
+    await new Promise((r) => setTimeout(r, 80));
+    await ticks();
+    await h.orch.playbackDone(); await ticks();
+    // Answer 3: facts already had its interrupt, so the decider is not asked.
+    s = h.session();
+    h.setNow(40000); s.emit({ type: "partial", text: "We take" }); await ticks(3);
+    h.setNow(50000); s.emit({ type: "partial", text: "We take this very seriously for a very long time now" });
+    await ticks(12);
+    expect(decider.calls).toHaveLength(1);
+    expect(h.messages.filter((m) => m.type === "interrupt")).toHaveLength(1);
     await h.orch.stop();
   });
 

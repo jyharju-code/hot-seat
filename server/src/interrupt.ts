@@ -14,6 +14,10 @@ export interface InterruptDecisionInput {
   seconds: number;
   partial: string;
   facts: string;
+  /** Brief 18b: the active beat's goal, so the cut-in presses on the live topic. */
+  beatGoal?: string;
+  /** Brief 18b: every question already asked: the cut-in must not re-ask one. */
+  asked?: readonly string[];
 }
 
 /**
@@ -60,6 +64,8 @@ export class LlmInterruptDecider implements InterruptDecider {
       seconds: String(Math.round(input.seconds)),
       partial: input.partial,
       facts: input.facts,
+      beat_goal: input.beatGoal?.trim() ? input.beatGoal : "(none)",
+      asked_lines: input.asked && input.asked.length > 0 ? input.asked.map((a) => `- ${a}`).join("\n") : "(none yet)",
     });
     const result = await this.llm.chat({
       model: this.model,

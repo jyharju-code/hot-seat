@@ -1,6 +1,7 @@
 import { isProfileScenario, reporterLineSchema, revealedLandmines, sessionDurationSeconds, PROFILE_WRAP_UP_SECONDS, type Escalation, type GeneratedScenario, type ReporterLine } from "@hot-seat/shared";
 import type { Llm } from "./providers/llm.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
+import { resolveEffectiveBeatId } from "./session/line-match.js";
 import type { DemoScenario } from "./scenarios/cafe.js";
 
 export interface JournalistPrompts {
@@ -35,6 +36,12 @@ export interface InterviewTurnContext {
   closedBeatIds: string[];
   callbackBeatId?: string | null;
   fallbackLine: ReporterLine;
+  /** Brief 18b: beat each asked line served, parallel to `asked`, interrupts included. */
+  askedBeats?: Array<string | undefined>;
+  /** Brief 18b: beats closed OR already at max_questions: serving them again is a repeat. */
+  spentBeatIds?: string[];
+  /** Brief 18b: distinctive landmine facts, for repairing a wrong model beat label. */
+  landmineFacts?: Array<{ beatId: string; fact: string }>;
 }
 
 export function isProfileBrainScenario(scenario: BrainScenario): boolean {
@@ -184,10 +191,22 @@ export class JournalistBrain {
     const duration = profile && isGenerated(scenario) ? sessionDurationSeconds(scenario) : 0;
     const goodbyeLocked = profile && duration > 0 && elapsedSeconds < duration - PROFILE_WRAP_UP_SECONDS;
     const isGoodbye = (t: string) => /\b(thank you|thanks|goodbye|farewell)\b/.test(norm(t)) || /\bbye\b/.test(norm(t)) || norm(t).includes("nearly out of time");
-    const isRepeat = (line: ReporterLine): boolean =>
-      Boolean(line.beat_id && interview.closedBeatIds.includes(line.beat_id) && line.beat_id !== interview.callbackBeatId)
-      || interview.asked.some((a) => norm(a) === norm(line.say))
-      || (goodbyeLocked && isGoodbye(line.say));
+    // Brief 18b: the line counts where its text belongs, not only where the
+    // model labelled it. A screening-form line labelled `responsibility`
+    // still serves its landmine beat, and serving a spent beat is a repeat.
+    const spent = new Set([...interview.closedBeatIds, ...(interview.spentBeatIds ?? [])]);
+    const effectiveBeat = (line: ReporterLine): string | undefined =>
+      resolveEffectiveBeatId(line.say ?? "", line.beat_id ?? undefined, {
+        asked: interview.asked,
+        askedBeats: interview.askedBeats ?? [],
+        landmineFacts: interview.landmineFacts ?? [],
+      });
+    const isRepeat = (line: ReporterLine): boolean => {
+      const effective = effectiveBeat(line);
+      if (effective && spent.has(effective) && effective !== interview.callbackBeatId) return true;
+      return interview.asked.some((a) => norm(a) === norm(line.say))
+        || (goodbyeLocked && isGoodbye(line.say));
+    };
     let line = await this.ask(prompt, signal);
     if (!isRepeat(line)) return line;
     const retryPrompt = `${prompt}\n\nYou already covered that. Move to: ${interview.nextBeatGoal || interview.activeBeatLine}`;

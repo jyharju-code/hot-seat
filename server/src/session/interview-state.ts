@@ -1,6 +1,7 @@
 import { isProfileScenario, type AnswerAssessment, type BeatStatus, type Commitment, type EstablishedFact, type GeneratedScenario, type InterviewBeat, type InterviewMapRow, type InterviewPlan, type ReporterLine } from "@hot-seat/shared";
 import type { BrainScenario } from "../journalist.js";
 import { isGenerated } from "../journalist.js";
+import { resolveEffectiveBeatId } from "./line-match.js";
 
 export type { InterviewBeat, InterviewPlan, BeatStatus };
 export type DirectiveType = "PUSH" | "MOVE_ON" | "CALLBACK";
@@ -13,7 +14,7 @@ export interface Directive {
 
 export interface InterviewState {
   plan: InterviewPlan;
-  beats: Array<{ beat: InterviewBeat; status: BeatStatus; questions: number }>;
+  beats: Array<{ beat: InterviewBeat; status: BeatStatus; questions: number; interrupts: number }>;
   established: EstablishedFact[];
   commitments: Commitment[];
   open_threads: string[];
@@ -143,7 +144,7 @@ export function createInterviewState(plan: InterviewPlan): InterviewState {
   const normalized = withBeatDefaults(plan);
   return {
     plan: normalized,
-    beats: normalized.beats.map((beat, i) => ({ beat, status: i === 0 ? "active" : "open", questions: 0 })),
+    beats: normalized.beats.map((beat, i) => ({ beat, status: i === 0 ? "active" : "open", questions: 0, interrupts: 0 })),
     established: [], commitments: [], open_threads: [], asked: [], callbackUsed: false, callbackBeatId: null, repeatCount: 0, servedBeats: [], turn: 0,
   };
 }
@@ -164,10 +165,48 @@ export function isClosedBeat(state: InterviewState, beatId: string | undefined):
   const b = beatState(state, beatId);
   return b ? isClosedStatus(b.status) : false;
 }
-/** A line serving a closed beat is a repeat, unless it is the one allowed CALLBACK. */
-export function isRepeatLine(state: InterviewState, line: Pick<ReporterLine, "beat_id">, opts: { isCallback?: boolean } = {}): boolean {
-  if (!line.beat_id) return false;
-  if (!isClosedBeat(state, line.beat_id)) return false;
+/** True when a beat is closed or already served its maximum questions. */
+export function isSpentBeat(state: InterviewState, beatId: string | undefined): boolean {
+  const b = beatState(state, beatId);
+  if (!b) return false;
+  return isClosedStatus(b.status) || b.questions >= b.beat.max_questions;
+}
+
+/** Distinctive landmine facts, for repairing a wrong model `beat_id` label. */
+export function landmineFacts(state: InterviewState): Array<{ beatId: string; fact: string }> {
+  return state.beats
+    .filter((b) => b.beat.kind === "landmine")
+    .map((b) => ({ beatId: b.beat.id, fact: `${b.beat.goal.replace(/^Confront:\s*/i, "")} ${b.beat.done_when.replace(/^Owner answers about:\s*/i, "")}`.trim() }));
+}
+
+/**
+ * Brief 18b: the beat a line really serves, by text as well as by label.
+ * A line sharing a key phrase with a landmine fact serves that landmine's
+ * beat even when the model labelled it otherwise; a line matching an earlier
+ * line from another beat serves that earlier beat. Compares against every
+ * earlier reporter line, interrupts included.
+ */
+export function resolveLineBeat(state: InterviewState, line: Pick<ReporterLine, "beat_id" | "say">): string | undefined {
+  return resolveEffectiveBeatId(line.say ?? "", line.beat_id ?? undefined, {
+    asked: state.asked,
+    askedBeats: state.servedBeats,
+    landmineFacts: landmineFacts(state),
+  });
+}
+
+/** Brief 18b: at most one interrupt per beat, and never on a spent beat. */
+export function canInterruptBeat(state: InterviewState, beatId: string | undefined): boolean {
+  const b = beatState(state, beatId);
+  if (!b) return true;
+  if (isClosedStatus(b.status)) return false;
+  if (b.questions >= b.beat.max_questions) return false;
+  return (b.interrupts ?? 0) < 1;
+}
+/** A line serving a spent (closed or at-limit) beat is a repeat, unless it is the one allowed CALLBACK. */
+export function isRepeatLine(state: InterviewState, line: Pick<ReporterLine, "beat_id" | "say">, opts: { isCallback?: boolean } = {}): boolean {
+  const effective = resolveLineBeat(state, line);
+  if (!effective) return false;
+  if (!isSpentBeat(state, effective)) return false;
   if (opts.isCallback && !state.callbackUsed) return false;
   return true;
 }
@@ -259,14 +298,17 @@ function shortLine(text: string): string {
 export function applyCommittedLine(state: InterviewState, line: ReporterLine, opts: { turn?: number; elapsedSeconds?: number; isCallback?: boolean; isRevisit?: boolean } = {}): InterviewState {
   const turn = opts.turn ?? state.turn + 1;
   state.turn = turn;
-  // Repeat accounting: serving a closed beat (excluding sanctioned callback).
-  if (line.beat_id && isClosedBeat(state, line.beat_id) && !opts.isRevisit && !(opts.isCallback && !state.callbackUsed)) {
+  // Brief 18b: the line serves the beat its text really belongs to, not just
+  // the model's label. Repeat accounting: serving a spent beat (excluding
+  // sanctioned callback).
+  const effectiveBeatId = resolveLineBeat(state, line);
+  if (effectiveBeatId && isSpentBeat(state, effectiveBeatId) && !opts.isRevisit && !(opts.isCallback && !state.callbackUsed)) {
     state.repeatCount += 1;
   }
   if (opts.isCallback && line.beat_id) { state.callbackUsed = true; state.callbackBeatId = line.beat_id; }
-  // Determine the beat this line serves: declared, else current active.
+  // Determine the beat this line serves: resolved by text, else current active.
   const elapsed = opts.elapsedSeconds ?? 0;
-  const targetId = line.beat_id ?? activeBeat(state, elapsed)?.id;
+  const targetId = effectiveBeatId ?? activeBeat(state, elapsed)?.id;
   const target = beatState(state, targetId ?? undefined);
   if (target && !isClosedStatus(target.status)) {
     target.status = "active";
@@ -314,6 +356,31 @@ export function applyCommittedLine(state: InterviewState, line: ReporterLine, op
 }
 export const applyCommittedTurn = applyCommittedLine;
 export const updateFromCommittedLine = applyCommittedLine;
+
+/**
+ * Brief 18b: a spoken interrupt counts as one question on the beat it
+ * presses. The cut-in usually names the active beat's topic, but when its
+ * words obviously match a landmine fact it counts there instead. Call this
+ * when the cut-in is actually spoken, never for a decision that was dropped.
+ * Returns the beat id the interrupt counted on, if any.
+ */
+export function applyInterruptLine(state: InterviewState, say: string, opts: { turn?: number; elapsedSeconds?: number } = {}): string | null {
+  const turn = opts.turn ?? state.turn + 1;
+  state.turn = turn;
+  const elapsed = opts.elapsedSeconds ?? 0;
+  const targetId = resolveLineBeat(state, { beat_id: undefined, say }) ?? activeBeat(state, elapsed)?.id ?? null;
+  const target = beatState(state, targetId ?? undefined);
+  if (target && !isClosedStatus(target.status)) {
+    target.status = "active";
+    target.questions += 1;
+    target.interrupts = (target.interrupts ?? 0) + 1;
+    for (const b of state.beats) if (b !== target && b.status === "active") b.status = "open";
+    if (target.questions >= target.beat.max_questions) target.status = "exhausted";
+  }
+  state.asked.push(shortLine(say));
+  if (targetId) state.servedBeats.push(targetId);
+  return targetId;
+}
 
 export interface TransitionOptions {
   asked?: readonly string[];
@@ -446,7 +513,7 @@ export const simMetricsForState = interviewSimMetrics;
 export function snapshotState(state: InterviewState) {
   return {
     plan: state.plan,
-    beats: state.beats.map((b) => ({ id: b.beat.id, goal: b.beat.goal, kind: b.beat.kind, status: b.status, questions: b.questions })),
+    beats: state.beats.map((b) => ({ id: b.beat.id, goal: b.beat.goal, kind: b.beat.kind, status: b.status, questions: b.questions, interrupts: b.interrupts ?? 0 })),
     established: [...state.established], commitments: [...state.commitments], open_threads: [...state.open_threads], asked: [...state.asked],
     callbackUsed: state.callbackUsed, repeatCount: state.repeatCount, servedBeats: [...state.servedBeats],
   };
