@@ -8,9 +8,11 @@ export interface ReporterLine {
   ended: boolean;
 }
 
-/** Playback duration of one line at 24 kHz PCM16. */
+/** Playback duration: real PCM in ElevenLabs mode; estimated (2.6 wps) in browser mode (no audio). */
 export function linePlaybackMs(line: ReporterLine): number {
-  return Math.round(line.audioBytes / 48);
+  if (line.audioBytes > 0) return Math.round(line.audioBytes / 48);
+  const words = line.text.replace(/\[[^\]]*\]/g, "").split(/\s+/).filter(Boolean).length;
+  return Math.round((words / 2.6) * 1000);
 }
 
 export class ReporterLineQueue {

@@ -326,6 +326,7 @@ export class SimSession {
       return { segments, voiced };
     })();
     void answerPromise.catch(() => undefined);
+    if (line.audioBytes === 0) this.ws?.send(JSON.stringify({ type: "speech_started", speechStartMs: 0 }));
     await sleep(playbackMs);
     this.ws?.send(JSON.stringify({ type: "playback_done" }));
     await this.waitFor(() => this.state.lastState === "listening", "listening state");

@@ -58,15 +58,34 @@ of them can be swapped without touching session code.
 |---|---|---|
 | `Llm` (chat + structured JSON) | Meta Model API (`https://api.meta.ai/v1`, OpenAI compatible; Muse Spark via chat completions, Muse Wonder via the Responses API) | Baseten Muse Spark Open (`https://inference.baseten.co/v1`, model `meta-models/muse-spark-open-1026`) |
 | `SpeechToText` (streaming) | Meta Muse Voice Transcribe (`wss://api.meta.ai/v1/asr/realtime`) | Soniox for Finnish |
-| `TextToSpeech` (streaming) | ElevenLabs `eleven_v4` | |
+| `TextToSpeech` | Browser speech synthesis by default (on-device, not a model call); ElevenLabs `eleven_v4` only when `TTS_PROVIDER=elevenlabs` | |
 | `ImageGen` (edit a photo) | Muse Image `/v1/images/edits` | |
 
 In this scaffold only the Meta `Llm` adapter is implemented. The other adapters are
 interfaces with TODO stubs that throw `NotImplemented`. One integration test calls
 the live Meta API and is skipped unless `MODEL_API_KEY` is set.
 
-Config keys (see `.env.example`): `MODEL_API_KEY`, `ELEVENLABS_API_KEY`,
-`SONIOX_API_KEY`, `BASETEN_API_KEY`. Optional overrides: `SERVER_PORT`
+Config keys (see `.env.example`): `MODEL_API_KEY`, `ELEVENLABS_API_KEY` (optional),
+`SONIOX_API_KEY`, `BASETEN_API_KEY`, `TTS_PROVIDER` (`browser` default, or `elevenlabs`).
+
+## Models at runtime
+
+| Runtime call | What it is |
+|---|---|
+| Muse Voice Transcribe | Meta model call (speech to text) |
+| Muse Spark / Wonder (Meta API) | Meta model calls (reporters, scenarios, debrief) |
+| muse-spark-open on Baseten | Meta model call (optional turn provider/hedge) |
+| Muse Image | Meta model call (front page and studio images) |
+| Speech synthesis (reporter, radio, anchor) | Browser/OS feature (`speechSynthesis`, on-device voices only, not a model call) |
+| Audio capture and news player | Browser features (microphone, playback, canvas) |
+
+The ElevenLabs adapter, its voices and the Soniox configuration stay in the code behind
+`TTS_PROVIDER=elevenlabs` (off by default, requires `ELEVENLABS_API_KEY`). Without that key the
+server falls back to `browser` and logs why.
+
+Dev-only: the sim (`npm run sim`) may use ElevenLabs for its synthetic owner voices. That is a
+test tool, never part of the product runtime. In browser mode the sim estimates a reporter
+line's spoken duration at about 2.6 words per second and then sends `playback_done`. Optional overrides: `SERVER_PORT`
 (default 3001), `SERVER_HOST` (default 127.0.0.1), `LLM_CHAT_MODEL`
 (default `muse-spark-1.3`), `LLM_STRUCTURED_MODEL` (default
 `muse-wonder-1.0`). Never commit `.env`.
