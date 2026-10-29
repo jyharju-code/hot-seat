@@ -16,7 +16,8 @@ import { cafeProfileScenario, cafeTestScenario } from "../src/scenarios/cafe.js"
 import { normalizeProfileScenario } from "../src/scenarios/director.js";
 import { profilePresets, presets } from "../src/scenarios/presets.js";
 import { ScenarioStore } from "../src/scenarios/store.js";
-import { SessionOrchestrator, MAX_SESSION_MS, type ClientSink } from "../src/session/orchestrator.js";
+import { SessionOrchestrator, MAX_SESSION_MS, PROFILE_COMPLETE_MESSAGE, type ClientSink } from "../src/session/orchestrator.js";
+import { PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE } from "@hot-seat/shared";
 import { SessionStore, formatHarvestedQuotes, harvestedQuotes } from "../src/session/store.js";
 import type { SpeechToText, SttEvent, SttSession } from "../src/providers/speech-to-text.js";
 import type { TextToSpeech } from "../src/providers/text-to-speech.js";
@@ -147,6 +148,91 @@ describe("profile orchestrator", () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(messages.some((m) => m.type === "session_complete")).toBe(true);
       expect(deciderCalls).toBe(0);
+      await orch.stop();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("wrap-up: owner speaking at wrap-up moment, next reporter line is the wrap-up question", async () => {
+    vi.useFakeTimers();
+    try {
+      const messages: ServerMessage[] = [];
+      const sink: ClientSink = { send: (m) => messages.push(m), sendAudio: () => undefined };
+      const stt = new FakeStt();
+      const brain = {
+        openingQuestion: async (): Promise<ReporterLine> => ({ move: "new_angle", flags: [], say: "Tell me your story.", quote_used: null }),
+        nextTurn: async (): Promise<ReporterLine> => ({ move: "follow_up", flags: [], say: "Lovely, tell me more about the early days.", quote_used: null }),
+      };
+      const record = { id: "s-wrap1", scenario: cafeProfileScenario, startedAtMs: 0, turns: [] as never[] };
+      const orch = new SessionOrchestrator({
+        stt, brain: brain as never, tts: new FakeTts(), ttsProvider: "browser", sink,
+        scenario: cafeProfileScenario, voiceId: "v1", record: record as never,
+        turnEndSilenceMs: 0, turnEndHesitantMs: 0, listenIdleMs: 600_000, maxSessionMs: 720_000,
+      });
+      await orch.start();
+      await orch.playbackDone();
+      stt.sessions[0]!.emit({ type: "partial", text: "We opened ten years ago and I have a very long story about those early days and I keep talking" });
+      await vi.advanceTimersByTimeAsync(255_000);
+      expect(orch.isOwnerSpeaking).toBe(true);
+      expect(orch.isWrapUpDue).toBe(true);
+      stt.sessions[0]!.emit({ type: "final", text: "We opened ten years ago.", turnId: "t1" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      const reporterTexts = messages.filter((m) => m.type === "transcript" && m.role === "reporter").map((m) => (m as { text: string }).text);
+      expect(reporterTexts).toContain(PROFILE_WRAP_UP_LINE);
+      expect(reporterTexts).not.toContain("Lovely, tell me more about the early days.");
+      expect(orch.isWrapUpSpoken).toBe(true);
+      await orch.stop();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("wrap-up: no next line before the end, final thank-you is the warm cut-in", async () => {
+    vi.useFakeTimers();
+    try {
+      const messages: ServerMessage[] = [];
+      const sink: ClientSink = { send: (m) => messages.push(m), sendAudio: () => undefined };
+      const stt = new FakeStt();
+      const brain = {
+        openingQuestion: async (): Promise<ReporterLine> => ({ move: "new_angle", flags: [], say: "Tell me your story.", quote_used: null }),
+        nextTurn: async (): Promise<ReporterLine> => ({ move: "follow_up", flags: [], say: "Lovely, tell me more.", quote_used: null }),
+      };
+      const record = { id: "s-wrap2", scenario: cafeProfileScenario, startedAtMs: 0, turns: [] as never[] };
+      const orch = new SessionOrchestrator({
+        stt, brain: brain as never, tts: new FakeTts(), ttsProvider: "browser", sink,
+        scenario: cafeProfileScenario, voiceId: "v1", record: record as never,
+        turnEndSilenceMs: 0, turnEndHesitantMs: 0, listenIdleMs: 600_000, maxSessionMs: 720_000,
+      });
+      await orch.start();
+      await orch.playbackDone();
+      stt.sessions[0]!.emit({ type: "partial", text: "I am still telling a very long story about the early days and I have not finished at all" });
+      await vi.advanceTimersByTimeAsync(300_000);
+      const complete = messages.find((m) => m.type === "session_complete") as { message: string; voiceHint?: unknown } | undefined;
+      expect(complete?.message).toBe(PROFILE_CUT_IN_MESSAGE);
+      expect(complete?.voiceHint).toEqual({ role: "reporter", temperament: "human", gender: cafeProfileScenario.journalists[0]!.voice });
+      const reporterTexts = messages.filter((m) => m.type === "transcript" && m.role === "reporter").map((m) => (m as { text: string }).text);
+      expect(reporterTexts).not.toContain(PROFILE_WRAP_UP_LINE);
+      await orch.stop();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("profile ending: not mid-answer, session_complete carries the normal thank-you and reporter voice hint", async () => {
+    vi.useFakeTimers();
+    try {
+      const messages: ServerMessage[] = [];
+      const sink: ClientSink = { send: (m) => messages.push(m), sendAudio: () => undefined };
+      const brain = {
+        openingQuestion: async (): Promise<ReporterLine> => ({ move: "new_angle", flags: [], say: "Tell me your story.", quote_used: null }),
+        nextTurn: async (): Promise<ReporterLine> => ({ move: "follow_up", flags: [], say: "Tell me more.", quote_used: null }),
+      };
+      const record = { id: "s-wrap3", scenario: cafeProfileScenario, startedAtMs: 0, turns: [] as never[] };
+      const orch = new SessionOrchestrator({
+        stt: new FakeStt(), brain: brain as never, tts: new FakeTts(), ttsProvider: "browser", sink,
+        scenario: cafeProfileScenario, voiceId: "v1", record: record as never,
+        turnEndSilenceMs: 0, turnEndHesitantMs: 0, listenIdleMs: 600_000, maxSessionMs: 720_000,
+      });
+      await orch.start();
+      await vi.advanceTimersByTimeAsync(300_000);
+      const complete = messages.find((m) => m.type === "session_complete") as { message: string; voiceHint?: unknown } | undefined;
+      expect(complete?.message).toBe(PROFILE_COMPLETE_MESSAGE);
+      expect(complete?.voiceHint).toBeTruthy();
       await orch.stop();
     } finally { vi.useRealTimers(); }
   });

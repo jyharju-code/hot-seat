@@ -183,8 +183,19 @@ export function Session({
     else if (msg.type === "session_complete") {
       setEndedMessage(msg.message);
       setLive(false);
-      // Go to the debrief as if End was pressed.
-      window.setTimeout(() => end(), 600);
+      if (msg.voiceHint) {
+        // Speak the thank-you (or warm cut-in) in the reporter's voice and
+        // go to the debrief only when it ends.
+        browserLineRef.current = true;
+        lineSentAtRef.current = performance.now();
+        speechRef.current?.speak(msg.message, msg.voiceHint, {
+          onStart: () => { const ws = wsRef.current; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "speech_started", speechStartMs: Math.round(performance.now() - lineSentAtRef.current) })); },
+          onDone: () => { browserLineRef.current = false; end(); },
+        });
+      } else {
+        // No browser voice hint (ElevenLabs / legacy): go to debrief.
+        window.setTimeout(() => end(), 600);
+      }
     }
     else if (msg.type === "interrupt") {
       setState("speaking");

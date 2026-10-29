@@ -1,4 +1,4 @@
-import { CONNECTION_HICCUP_MESSAGE, isProfileScenario, isSessionComplete, sessionDurationSeconds, stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming, type TtsProvider, type VoiceHint } from "@hot-seat/shared";
+import { CONNECTION_HICCUP_MESSAGE, PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE, PROFILE_WRAP_UP_SECONDS, isProfileScenario, isSessionComplete, sessionDurationSeconds, shouldWrapUp, isWrapUpLine, stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming, type TtsProvider, type VoiceHint } from "@hot-seat/shared";
 import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
 import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
@@ -106,6 +106,7 @@ export const STT_RECONNECT_BACKOFF_MS: readonly number[] = [250, 500, 1000];
 export const LISTEN_IDLE_MS = 60_000;
 export const MAX_SESSION_MS = 720_000;
 export const PROFILE_COMPLETE_MESSAGE = "Thank you so much, that was a pleasure. That is everything I need for the feature.";
+export { PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE };
 export const IDLE_ENDED_MESSAGE = "Session ended after a minute of silence.";
 export const MAX_ENDED_MESSAGE = "Session ended after reaching the maximum session length.";
 export const INTERRUPT_AFTER_MS = 8000;
@@ -175,7 +176,11 @@ export class SessionOrchestrator {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
   private profileTimer: ReturnType<typeof setTimeout> | null = null;
+  private wrapUpTimer: ReturnType<typeof setTimeout> | null = null;
   private profileCompleted = false;
+  private ownerSpeaking = false;
+  private wrapUpDue = false;
+  private wrapUpSpoken = false;
   private sttFailures = 0;
   private lastSttError = "STT session closed";
 
@@ -198,6 +203,10 @@ export class SessionOrchestrator {
   get currentState(): SessionState {
     return this.state;
   }
+
+  get isWrapUpSpoken(): boolean { return this.wrapUpSpoken; }
+  get isWrapUpDue(): boolean { return this.wrapUpDue; }
+  get isOwnerSpeaking(): boolean { return this.ownerSpeaking; }
 
   get conversation(): readonly ConversationTurn[] {
     return this.history;
@@ -254,6 +263,8 @@ export class SessionOrchestrator {
     this.maxTimer = null;
     if (this.profileTimer) clearTimeout(this.profileTimer);
     this.profileTimer = null;
+    if (this.wrapUpTimer) clearTimeout(this.wrapUpTimer);
+    this.wrapUpTimer = null;
   }
 
   private get isProfile(): boolean {
@@ -267,6 +278,7 @@ export class SessionOrchestrator {
   private armProfileTimer(): void {
     if (!this.isProfile || this.profileCompleted) return;
     if (this.profileTimer) clearTimeout(this.profileTimer);
+    if (this.wrapUpTimer) clearTimeout(this.wrapUpTimer);
     const ms = this.profileDurationSeconds * 1000;
     if (ms <= 0) return;
     this.profileTimer = setTimeout(() => {
@@ -275,14 +287,36 @@ export class SessionOrchestrator {
       this.completeProfileSession();
     }, ms);
     (this.profileTimer as { unref?: () => void }).unref?.();
+    const wrapMs = Math.max(0, ms - PROFILE_WRAP_UP_SECONDS * 1000);
+    this.wrapUpTimer = setTimeout(() => {
+      this.wrapUpTimer = null;
+      if (this.stopped || this.profileCompleted || this.wrapUpSpoken) return;
+      // Owner mid-answer: the next reporter line must be the wrap-up.
+      // Otherwise the normal next line (already in wrapping_up phase) is
+      // forced to the wrap-up at handleFinal time as well.
+      this.wrapUpDue = true;
+      if (this.ownerSpeaking) this.abortSpeculative();
+    }, wrapMs);
+    (this.wrapUpTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** Next reporter line forced to the wrap-up question, once. */
+  private takeWrapUpLine(): ReporterLine | null {
+    if (!this.isProfile || this.profileCompleted || this.wrapUpSpoken) return null;
+    if (!this.wrapUpDue && !shouldWrapUp(this.elapsedSeconds(), this.profileDurationSeconds)) return null;
+    if (isSessionComplete(this.elapsedSeconds(), this.profileDurationSeconds)) return null;
+    this.wrapUpSpoken = true;
+    this.wrapUpDue = false;
+    return { move: "follow_up", flags: [], say: PROFILE_WRAP_UP_LINE, quote_used: null };
   }
 
   /** Profile time is up: thank warmly via session_complete and end by itself. */
   private completeProfileSession(): void {
     if (this.profileCompleted || this.stopped) return;
     this.profileCompleted = true;
+    const message = this.ownerSpeaking ? PROFILE_CUT_IN_MESSAGE : PROFILE_COMPLETE_MESSAGE;
     try {
-      this.deps.sink.send({ type: "session_complete", message: PROFILE_COMPLETE_MESSAGE });
+      this.deps.sink.send({ type: "session_complete", message, ...(this.isBrowserTts ? { voiceHint: this.reporterHint() } : {}) });
     } catch { /* client gone */ }
     try {
       this.deps.onSessionEnded?.();
@@ -394,6 +428,7 @@ export class SessionOrchestrator {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.ownerSpeaking = false;
     this.awaitingPlayback = false;
     this.abortController.abort();
     this.abortSpeculative();
@@ -503,6 +538,7 @@ export class SessionOrchestrator {
 
   private async beginListening(): Promise<void> {
     if (this.stopped) return;
+    this.ownerSpeaking = false;
     this.sttFailures = 0;
     this.speechEndAt = null;
     const session = await this.openSttWithRetry();
@@ -717,6 +753,7 @@ export class SessionOrchestrator {
           this.noteSpeech();
           const text = ev.text.trim();
           if (text) {
+            this.ownerSpeaking = true;
             if (answerStartedAt === null) answerStartedAt = this.now();
             lastSpeechAt = this.now();
             pendingPartial = text;
@@ -746,6 +783,7 @@ export class SessionOrchestrator {
           const segment = ev.text.trim();
           if (!segment) continue;
           this.noteSpeech();
+          this.ownerSpeaking = true;
           if (answerStartedAt === null) answerStartedAt = this.now();
           parts.push(segment);
           pendingPartial = "";
@@ -950,6 +988,7 @@ export class SessionOrchestrator {
 
   /** Cut the owner off: the partial is their answer, the cut-in is the next question. */
   private async handleInterrupt(req: { text: string; say: string; reason: string; decisionAt: number; latencyMs: number }): Promise<void> {
+    this.ownerSpeaking = false;
     this.abortSpeculative();
     this.teardownStt();
     this.ownerAudio?.sealTurn(req.text.trim(), this.pendingNativeWordTimes);
@@ -1001,6 +1040,7 @@ export class SessionOrchestrator {
   }
 
   private async handleFinal(text: string, speechEndAt: number, finalAt: number): Promise<void> {
+    this.ownerSpeaking = false;
     this.teardownStt(true);
     this.ownerAudio?.sealTurn(text.trim(), this.pendingNativeWordTimes);
     this.pendingNativeWordTimes = null;
@@ -1023,8 +1063,12 @@ export class SessionOrchestrator {
     let speculativeBuffer: SpeculativeTtsBuffer | null = null;
     let partialStartUsed = false;
     let raceWinner: "meta" | "baseten" | null = null;
+    const wrapLine = this.takeWrapUpLine();
     try {
-      if (escalation) {
+      if (wrapLine) {
+        this.abortSpeculative();
+        line = wrapLine;
+      } else if (escalation) {
         // The speculative reply was generated without the new fact.
         this.abortSpeculative();
         this.history.push({ role: "news", text: escalation.news_flash });
@@ -1109,6 +1153,7 @@ export class SessionOrchestrator {
       }
     }
     const llmAt = this.now();
+    if (this.isProfile && isWrapUpLine(line.say)) this.wrapUpSpoken = true;
     userTurn.flags = [...line.flags];
     this.deps.record?.turns.push({
       role: "reporter",

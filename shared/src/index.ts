@@ -149,7 +149,7 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("news_flash"), text: z.string(), atSeconds: z.number().nonnegative(), voiceHint: voiceHintSchema.optional() }),
   z.object({ type: z.literal("interrupt"), say: z.string(), voiceHint: voiceHintSchema.optional() }),
   z.object({ type: z.literal("reporter_line"), line: reporterLineSchema, voiceHint: voiceHintSchema.optional() }),
-  z.object({ type: z.literal("session_complete"), message: z.string() }),
+  z.object({ type: z.literal("session_complete"), message: z.string(), voiceHint: voiceHintSchema.optional() }),
   z.object({ type: z.literal("audio_end") }),
   z.object({ type: z.literal("timing"), timing: turnTimingSchema }),
   z.object({ type: z.literal("error"), message: z.string() }),
@@ -263,6 +263,16 @@ export function shouldWrapUp(elapsedSeconds: number, durationSeconds: number): b
 
 export function isSessionComplete(elapsedSeconds: number, durationSeconds: number): boolean {
   return profilePhase(elapsedSeconds, durationSeconds) === "complete";
+}
+
+export const PROFILE_WRAP_UP_LINE = "We're nearly out of time, one last question: what are you proudest of in all these years?";
+export const PROFILE_COMPLETE_MESSAGE = "Thank you so much, that was a pleasure. That is everything I need for the feature.";
+export const PROFILE_CUT_IN_MESSAGE = "I'm so sorry to stop you there, we're out of time. Thank you, this was lovely.";
+
+/** True for the deterministic profile wrap-up line (or the prompt's variant). */
+export function isWrapUpLine(text: string): boolean {
+  const t = text.toLowerCase();
+  return t.includes("nearly out of time") && t.includes("one last question");
 }
 
 export interface CreateScenarioResponse {
