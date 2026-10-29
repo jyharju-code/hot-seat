@@ -80,6 +80,8 @@ export function buildReport(results: readonly SessionResult[], meta: { preset: s
     lines.push(`## Session: ${session.profile} (${session.session_id ?? "no session id"})`, "");
     if (session.mode === "profile") {
       lines.push(`Profile ending: session_complete ${session.session_complete ? "yes" : "no"}, wrap-up spoken ${session.wrap_up_spoken ? "yes" : "no"}`, "");
+    } else if (session.session_complete) {
+      lines.push("Hot seat ending: session_complete yes (normal end)", "");
     }
     if (session.failure) lines.push(`Failure: ${session.failure}`, "");
     if (session.interview) {

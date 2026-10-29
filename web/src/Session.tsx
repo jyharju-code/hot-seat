@@ -48,13 +48,15 @@ export function Session({
   const speechRef = useRef<BrowserSpeech | null>(null);
   const browserLineRef = useRef(false);
   const lineSentAtRef = useRef(0);
+  const lastReporterTextRef = useRef("");
+  const pendingCompleteRef = useRef(false);
   if (!speechRef.current) speechRef.current = new BrowserSpeech();
   const sendPlaybackDone = () => { const ws = wsRef.current; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "playback_done" })); };
   const speakBrowser = (text: string, hint: Parameters<BrowserSpeech["speak"]>[1], done: boolean) => {
     browserLineRef.current = true; lineSentAtRef.current = performance.now();
     speechRef.current?.speak(text, hint, {
       onStart: () => { const ws = wsRef.current; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "speech_started", speechStartMs: Math.round(performance.now() - lineSentAtRef.current) })); },
-      onDone: () => { if (done) { browserLineRef.current = false; sendPlaybackDone(); } },
+      onDone: () => { if (done) { browserLineRef.current = false; if (pendingCompleteRef.current) { pendingCompleteRef.current = false; end(); } else sendPlaybackDone(); } },
     });
   };
 
@@ -183,7 +185,11 @@ export function Session({
     else if (msg.type === "session_complete") {
       setEndedMessage(msg.message);
       setLive(false);
-      if (msg.voiceHint) {
+      if (msg.voiceHint && stripAudioTags(msg.message) === lastReporterTextRef.current) {
+        // Hot-seat close: this line was already sent as reporter_line.
+        if (browserLineRef.current) pendingCompleteRef.current = true;
+        else end();
+      } else if (msg.voiceHint) {
         // Speak the thank-you (or warm cut-in) in the reporter's voice and
         // go to the debrief only when it ends.
         browserLineRef.current = true;
@@ -216,7 +222,7 @@ export function Session({
       setEntries((e) => [...e, { role: msg.role, text: display }]);
     } else if (msg.type === "reporter_line") {
       playerRef.current?.beginLine();
-      const line: ReporterLine = msg.line; setQuestion(stripAudioTags(line.say));
+      const line: ReporterLine = msg.line; lastReporterTextRef.current = stripAudioTags(line.say); setQuestion(stripAudioTags(line.say));
       if (msg.voiceHint) speakBrowser(line.say, msg.voiceHint, true);
     } else if (msg.type === "audio_end") {
       if (browserLineRef.current) return; // browser speech will send playback_done onend

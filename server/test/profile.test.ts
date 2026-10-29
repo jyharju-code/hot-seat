@@ -237,7 +237,7 @@ describe("profile orchestrator", () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it("profile ending: a last reporter thank-you makes the final line short, not a second full goodbye", async () => {
+  it("profile ending: goodbye before wrap-up is rejected, final line stays the full thank-you (17b)", async () => {
     expect(isThankYouOrGoodbyeLine("Thank you so much, this has been such a pleasure.")).toBe(true);
     expect(isThankYouOrGoodbyeLine("Goodbye for now.")).toBe(true);
     expect(isThankYouOrGoodbyeLine("Thanks a lot.")).toBe(true);
@@ -266,12 +266,45 @@ describe("profile orchestrator", () => {
       stt.sessions[0]!.emit({ type: "final", text: "We opened ten years ago.", turnId: "t1" });
       await vi.advanceTimersByTimeAsync(1_000);
       const reporterTexts = messages.filter((m) => m.type === "transcript" && m.role === "reporter").map((m) => (m as { text: string }).text);
-      expect(reporterTexts).toContain("Thank you so much, this has been such a pleasure.");
+      // Brief 17b: a goodbye before wrap-up time is rejected like a repeat.
+      expect(reporterTexts).not.toContain("Thank you so much, this has been such a pleasure.");
       await vi.advanceTimersByTimeAsync(300_000);
       const complete = messages.find((m) => m.type === "session_complete") as { message: string } | undefined;
-      expect(complete?.message).toBe("Thank you again.");
+      expect(complete?.message).toBe(PROFILE_COMPLETE_MESSAGE);
       await orch.stop();
     } finally { vi.useRealTimers(); }
+  });
+
+  it("brief 17b: hot seat close beat ends the session with session_complete, close line as message", async () => {
+    const messages: ServerMessage[] = [];
+    const sink: ClientSink = { send: (m) => messages.push(m), sendAudio: () => undefined };
+    const stt = new FakeStt();
+    const closeSay = "Thank you for speaking to me. I will put all of that to our readers today.";
+    const brain = {
+      openingQuestion: async (): Promise<ReporterLine> => ({ move: "new_angle", flags: [], say: "When did it break?", quote_used: null, beat_id: "facts" }),
+      nextTurn: async (): Promise<ReporterLine> => ({ move: "new_angle", flags: [], say: closeSay, quote_used: null, beat_id: "close" }),
+    };
+    const record = { id: "s-hotclose", scenario: cafeTestScenario, startedAtMs: 0, turns: [] as never[] };
+    let ended = 0;
+    const orch = new SessionOrchestrator({
+      stt, brain: brain as never, tts: new FakeTts(), ttsProvider: "browser", sink,
+      scenario: cafeTestScenario, voiceId: "v1", record: record as never,
+      turnEndSilenceMs: 0, turnEndHesitantMs: 0, listenIdleMs: 600_000, maxSessionMs: 720_000,
+      onSessionEnded: () => { ended += 1; },
+    });
+    await orch.start();
+    await orch.playbackDone();
+    stt.sessions[0]!.emit({ type: "final", text: "We pulled the pastries at once.", turnId: "t1" });
+    const t0 = Date.now();
+    while (!messages.some((m) => m.type === "session_complete")) {
+      if (Date.now() - t0 > 3000) throw new Error("session_complete timed out");
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const complete = messages.find((m) => m.type === "session_complete") as { message: string } | undefined;
+    expect(complete?.message).toBe(closeSay);
+    expect(messages.filter((m) => m.type === "session_complete")).toHaveLength(1);
+    expect(ended).toBe(1);
+    await orch.stop();
   });
 
   it("a profile turn fires no escalation and no interrupt even when one is due and a decider says yes", async () => {

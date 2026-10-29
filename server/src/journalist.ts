@@ -1,4 +1,4 @@
-import { isProfileScenario, reporterLineSchema, revealedLandmines, sessionDurationSeconds, type Escalation, type GeneratedScenario, type ReporterLine } from "@hot-seat/shared";
+import { isProfileScenario, reporterLineSchema, revealedLandmines, sessionDurationSeconds, PROFILE_WRAP_UP_SECONDS, type Escalation, type GeneratedScenario, type ReporterLine } from "@hot-seat/shared";
 import type { Llm } from "./providers/llm.js";
 import { fillTemplate, loadPrompt } from "./prompts.js";
 import type { DemoScenario } from "./scenarios/cafe.js";
@@ -178,10 +178,16 @@ export class JournalistBrain {
       spoken_style: this.prompts.spokenStyle,
     });
     if (!interview) return this.ask(prompt, signal);
-    // Repeat guard: a line for a closed beat (not the allowed CALLBACK) is a
-    // repeat. Retry once, then use the deterministic transition question.
+    // Repeat guard: closed beat, exact text already asked, or a profile
+    // goodbye before wrap-up time. Retry once, then deterministic fallback.
+    const norm = (t: string) => t.replace(/\[[^\]]*\]/g, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const duration = profile && isGenerated(scenario) ? sessionDurationSeconds(scenario) : 0;
+    const goodbyeLocked = profile && duration > 0 && elapsedSeconds < duration - PROFILE_WRAP_UP_SECONDS;
+    const isGoodbye = (t: string) => /\b(thank you|thanks|goodbye|farewell)\b/.test(norm(t)) || /\bbye\b/.test(norm(t)) || norm(t).includes("nearly out of time");
     const isRepeat = (line: ReporterLine): boolean =>
-      Boolean(line.beat_id && interview.closedBeatIds.includes(line.beat_id) && line.beat_id !== interview.callbackBeatId);
+      Boolean(line.beat_id && interview.closedBeatIds.includes(line.beat_id) && line.beat_id !== interview.callbackBeatId)
+      || interview.asked.some((a) => norm(a) === norm(line.say))
+      || (goodbyeLocked && isGoodbye(line.say));
     let line = await this.ask(prompt, signal);
     if (!isRepeat(line)) return line;
     const retryPrompt = `${prompt}\n\nYou already covered that. Move to: ${interview.nextBeatGoal || interview.activeBeatLine}`;

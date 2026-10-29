@@ -1,6 +1,6 @@
 import { CONNECTION_HICCUP_MESSAGE, PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE, PROFILE_WRAP_UP_SECONDS, isProfileScenario, isSessionComplete, sessionDurationSeconds, shouldWrapUp, isWrapUpLine, stripAudioTags, stripTranscriptTokens, type Escalation, type InterviewPlan, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming, type TtsProvider, type VoiceHint } from "@hot-seat/shared";
 import type { InterviewTurnContext } from "../journalist.js";
-import { applyCommittedLine, buildFallbackPlan, computeDirective, createInterviewState, isClosedStatus, snapshotState, transitionQuestionForBeat, type Directive, type InterviewState } from "./interview-state.js";
+import { applyCommittedLine, beatState, buildFallbackPlan, computeDirective, createInterviewState, isAlreadyAsked, isClosedStatus, minQuestionsForBeat, nextFallbackLine, snapshotState, type Directive, type InterviewState } from "./interview-state.js";
 import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
 import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
@@ -359,6 +359,27 @@ export class SessionOrchestrator {
       this.deps.onSessionEnded?.();
     } catch { /* best effort */ }
     void this.stop();
+  }
+
+  private hotSeatCompleted = false;
+
+  /** Hot seat: the close line itself is the session_complete message. */
+  private completeHotSeatSession(line: ReporterLine): void {
+    if (this.hotSeatCompleted || this.stopped) return;
+    this.hotSeatCompleted = true;
+    try {
+      this.deps.sink.send({ type: "session_complete", message: line.say, ...(this.isBrowserTts ? { voiceHint: this.reporterHint() } : {}) });
+    } catch { /* client gone */ }
+    try { this.deps.onSessionEnded?.(); } catch { /* best effort */ }
+    void this.stop();
+  }
+
+  private isHotSeatCloseLine(line: ReporterLine): boolean {
+    if (this.isProfile || !this.interviewState) return false;
+    const bs = line.beat_id ? beatState(this.interviewState, line.beat_id) : undefined;
+    if (bs?.beat.kind === "close") return true;
+    const nonCloseOpen = this.interviewState.beats.some((b) => b.beat.kind !== "close" && !isClosedStatus(b.status));
+    return !nonCloseOpen && isThankYouOrGoodbyeLine(line.say);
   }
 
   private maybeCompleteProfile(): boolean {
@@ -932,13 +953,18 @@ export class SessionOrchestrator {
     });
     this.lastDirective = directive;
     this.lastCallbackBeatId = directive.type === "CALLBACK" ? (directive.nextBeat?.id ?? null) : null;
-    const targetBeat = directive.type === "PUSH" ? directive.activeBeat : directive.nextBeat ?? directive.activeBeat;
-    const fallbackLine = targetBeat ? transitionQuestionForBeat(targetBeat) : { move: "follow_up" as const, flags: [], say: "Let's move on. What happens next?", quote_used: null };
+    const fallbackLine = nextFallbackLine(state, {
+      elapsedSeconds: elapsed,
+      durationSeconds: this.isProfile ? this.profileDurationSeconds : 0,
+      isProfile: this.isProfile,
+      ...(escalationBeatId ? { escalationBeatId } : {}),
+      ...(contradictionBeatId ? { contradictionBeatId } : {}),
+    });
     return {
-      planLines: state.beats.map((b) => `- ${b.beat.id} [${b.status}, ${b.questions}/${b.beat.max_questions}] ${b.beat.goal} (done when: ${b.beat.done_when})`).join("\n"),
+      planLines: state.beats.map((b) => `- ${b.beat.id} [${b.status}, ${b.questions}/${b.beat.max_questions} min ${minQuestionsForBeat(b.beat)}] ${b.beat.goal} (done when: ${b.beat.done_when})`).join("\n"),
       activeBeatLine: directive.activeBeat ? `${directive.activeBeat.id}: ${directive.activeBeat.goal} (done when: ${directive.activeBeat.done_when})` : "(none)",
       directive: `${directive.type}: ${directive.reason}`,
-      nextBeatGoal: directive.nextBeat?.goal ?? targetBeat?.goal ?? "",
+      nextBeatGoal: directive.nextBeat?.goal ?? directive.activeBeat?.goal ?? "",
       established: state.established.map((e) => e.text),
       commitments: state.commitments.map((c) => c.text),
       openThreads: [...state.open_threads],
@@ -1265,13 +1291,29 @@ export class SessionOrchestrator {
       }
     }
     const llmAt = this.now();
+    // Brief 17b validation: no goodbye before profile wrap-up, no repeated
+    // text, and no invented topics once the hot-seat plan is exhausted.
+    if (this.interviewState && !wrapLine) {
+      const elapsed = this.elapsedSeconds();
+      const duration = this.profileDurationSeconds;
+      const closeLocked = this.isProfile && duration > 0 && elapsed < duration - PROFILE_WRAP_UP_SECONDS;
+      const closeBeatId = this.interviewState.beats.find((b) => b.beat.kind === "close")?.beat.id;
+      const goodbyeEarly = closeLocked && (isThankYouOrGoodbyeLine(line.say) || isWrapUpLine(line.say) || (line.beat_id != null && line.beat_id === closeBeatId));
+      const textRepeat = isAlreadyAsked(this.interviewState.asked, line.say);
+      const nonCloseOpen = this.interviewState.beats.some((b) => b.beat.kind !== "close" && !isClosedStatus(b.status));
+      const planExhausted = !this.isProfile && !nonCloseOpen && line.beat_id !== closeBeatId;
+      if (goodbyeEarly || textRepeat || planExhausted) {
+        line = this.interviewContext()?.fallbackLine ?? line;
+      }
+    }
     if (this.isProfile && isWrapUpLine(line.say)) this.wrapUpSpoken = true;
     userTurn.flags = [...line.flags];
     this.lastCommittedFlags = [...line.flags];
     // Brief 17: state updates ONLY from this committed line.
     if (this.interviewState) {
       const isCallback = this.lastDirective?.type === "CALLBACK" && line.beat_id != null && line.beat_id === this.lastCallbackBeatId;
-      applyCommittedLine(this.interviewState, line, { turn: this.turnIndex, elapsedSeconds: this.elapsedSeconds(), ...(isCallback ? { isCallback: true } : {}) });
+      const isRevisit = this.isProfile && this.lastDirective?.reason.includes("revisit") === true && line.beat_id != null && isClosedStatus(beatState(this.interviewState, line.beat_id)?.status ?? "open");
+      applyCommittedLine(this.interviewState, line, { turn: this.turnIndex, elapsedSeconds: this.elapsedSeconds(), ...(isCallback ? { isCallback: true } : {}), ...(isRevisit ? { isRevisit: true } : {}) });
       this.syncInterviewRecord();
     }
     if (this.deps.devTurnLog) {
@@ -1313,6 +1355,7 @@ export class SessionOrchestrator {
         `speechEnd->firstAudio ${Math.round(timing.speechEndToFirstAudioMs)}ms totalToVoice ${Math.round(timing.totalToFirstAudioMs)}ms speculativeTtsUsed=${timing.speculativeTtsUsed} partialStartUsed=${timing.partialStartUsed} raceWinner=${timing.raceWinner ?? "none"}`,
     );
     if (this.maybeCompleteProfile()) return;
+    if (!this.isProfile && this.isHotSeatCloseLine(line)) { this.completeHotSeatSession(line); return; }
     // Wait for playback_done before opening the next STT session.
     if (!this.stopped) this.awaitingPlayback = true;
   }
