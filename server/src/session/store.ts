@@ -46,6 +46,8 @@ export interface SessionRecord {
   turns: TimedTurn[];
   /** Filled once a debrief has been generated for this finished session. */
   debrief?: Debrief;
+  /** Brief 17 interview plan/state snapshot. Optional so old records parse. */
+  interview?: unknown;
 }
 
 export const sessionRecordSchema = z.object({
@@ -55,6 +57,7 @@ export const sessionRecordSchema = z.object({
   startedAtMs: z.number(),
   turns: z.array(timedTurnSchema),
   debrief: debriefSchema.optional(),
+  interview: z.unknown().optional(),
 });
 
 export type SessionStoreOptions = string | { dataDir?: string; dir?: string; store?: Store<SessionRecord> };

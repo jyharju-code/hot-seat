@@ -8,16 +8,33 @@ export interface JournalistPrompts {
   journalistTurn: string;
   openingQuestion: string;
   profileTurn?: string;
+  interviewPlan?: string;
 }
 
 export async function loadJournalistPrompts(): Promise<JournalistPrompts> {
-  const [spokenStyle, journalistTurn, openingQuestion, profileTurn] = await Promise.all([
+  const [spokenStyle, journalistTurn, openingQuestion, profileTurn, interviewPlan] = await Promise.all([
     loadPrompt("spoken-style.md"),
     loadPrompt("journalist-turn.md"),
     loadPrompt("opening-question.md"),
     loadPrompt("profile-journalist-turn.md"),
+    loadPrompt("interview-plan.md").catch(() => ""),
   ]);
-  return { spokenStyle: spokenStyle.trim(), journalistTurn, openingQuestion, profileTurn };
+  return { spokenStyle: spokenStyle.trim(), journalistTurn, openingQuestion, profileTurn, interviewPlan };
+}
+
+/** Structured interview context computed in code before a turn (Brief 17). */
+export interface InterviewTurnContext {
+  planLines: string;
+  activeBeatLine: string;
+  directive: string;
+  nextBeatGoal: string;
+  established: string[];
+  commitments: string[];
+  openThreads: string[];
+  asked: string[];
+  closedBeatIds: string[];
+  callbackBeatId?: string | null;
+  fallbackLine: ReporterLine;
 }
 
 export function isProfileBrainScenario(scenario: BrainScenario): boolean {
@@ -133,10 +150,10 @@ export class JournalistBrain {
     elapsedSeconds = 0,
     signal?: AbortSignal,
     learnedEscalations: readonly Escalation[] = [],
+    interview?: InterviewTurnContext,
   ): Promise<ReporterLine> {
     const p = persona(scenario);
-    const tail = history
-      .slice(-6)
+    const full = history
       .map((t) => `${t.role === "user" ? "Owner" : t.role === "news" ? "News" : p.name}: ${t.text}`)
       .join("\n");
     const recent = history.filter((t) => t.role === "reporter").slice(-3).map((t) => t.text);
@@ -146,12 +163,31 @@ export class JournalistBrain {
       ...this.vars(scenario, elapsedSeconds, learnedEscalations),
       elapsed_seconds: String(Math.round(elapsedSeconds)),
       duration_seconds: String(profile && isGenerated(scenario) ? sessionDurationSeconds(scenario) : 0),
-      transcript_tail: tail || "(nothing yet)",
+      transcript_tail: full || "(nothing yet)",
+      full_transcript: full || "(nothing yet)",
       your_recent_lines: recent.length > 0 ? recent.join("\n") : "(none yet)",
+      interview_plan: interview?.planLines ?? "(no plan yet)",
+      active_beat: interview?.activeBeatLine ?? "(none)",
+      directive: interview?.directive ?? "PUSH",
+      next_beat_goal: interview?.nextBeatGoal ?? "",
+      established: interview && interview.established.length > 0 ? interview.established.join("; ") : "(nothing established yet)",
+      commitments: interview && interview.commitments.length > 0 ? interview.commitments.join("; ") : "(none)",
+      open_threads: interview && interview.openThreads.length > 0 ? interview.openThreads.join("; ") : "(none)",
+      asked_lines: interview && interview.asked.length > 0 ? interview.asked.map((a) => `- ${a}`).join("\n") : "(none yet)",
       last_answer: lastAnswer,
       spoken_style: this.prompts.spokenStyle,
     });
-    return this.ask(prompt, signal);
+    if (!interview) return this.ask(prompt, signal);
+    // Repeat guard: a line for a closed beat (not the allowed CALLBACK) is a
+    // repeat. Retry once, then use the deterministic transition question.
+    const isRepeat = (line: ReporterLine): boolean =>
+      Boolean(line.beat_id && interview.closedBeatIds.includes(line.beat_id) && line.beat_id !== interview.callbackBeatId);
+    let line = await this.ask(prompt, signal);
+    if (!isRepeat(line)) return line;
+    const retryPrompt = `${prompt}\n\nYou already covered that. Move to: ${interview.nextBeatGoal || interview.activeBeatLine}`;
+    line = await this.ask(retryPrompt, signal);
+    if (!isRepeat(line)) return line;
+    return interview.fallbackLine;
   }
 
   private vars(

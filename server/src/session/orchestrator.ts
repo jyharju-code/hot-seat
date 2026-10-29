@@ -1,4 +1,6 @@
-import { CONNECTION_HICCUP_MESSAGE, PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE, PROFILE_WRAP_UP_SECONDS, isProfileScenario, isSessionComplete, sessionDurationSeconds, shouldWrapUp, isWrapUpLine, stripAudioTags, type Escalation, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming, type TtsProvider, type VoiceHint } from "@hot-seat/shared";
+import { CONNECTION_HICCUP_MESSAGE, PROFILE_CUT_IN_MESSAGE, PROFILE_WRAP_UP_LINE, PROFILE_WRAP_UP_SECONDS, isProfileScenario, isSessionComplete, sessionDurationSeconds, shouldWrapUp, isWrapUpLine, stripAudioTags, stripTranscriptTokens, type Escalation, type InterviewPlan, type ReporterFlag, type ReporterLine, type ServerMessage, type SessionState, type TurnTiming, type TtsProvider, type VoiceHint } from "@hot-seat/shared";
+import type { InterviewTurnContext } from "../journalist.js";
+import { applyCommittedLine, buildFallbackPlan, computeDirective, createInterviewState, isClosedStatus, snapshotState, transitionQuestionForBeat, type Directive, type InterviewState } from "./interview-state.js";
 import { isGenerated, primaryJournalist, type JournalistBrain, type ConversationTurn, type BrainScenario } from "../journalist.js";
 import { isInterruptDecisionStale, type InterruptDecider } from "../interrupt.js";
 import type { SpeechToText, SttEvent, SttSession } from "../providers/speech-to-text.js";
@@ -88,6 +90,21 @@ export interface OrchestratorDeps {
   /** Owner mic capture for the news clip. Defaults to the registry entry for `record`. */
   ownerAudio?: OwnerAudioBuffer;
   asrLagMs?: number;
+  /** Brief 17: plan generator run in parallel with the opening question. */
+  interviewPlanProvider?: () => Promise<InterviewPlan>;
+  /** Brief 17: per-turn diagnostics sink (DEV_TURN_LOG). */
+  devTurnLog?: (entry: DevTurnLogEntry) => void;
+}
+
+export interface DevTurnLogEntry {
+  turn: number;
+  at: string;
+  sttEvents: Array<{ type: string; text: string; atMs: number }>;
+  committedOwnerText: string;
+  turnEndReason: string;
+  directive: string;
+  beatId: string | null;
+  answerAssessment: string | null;
 }
 
 export const NEWS_VOICE_ID = "3WqHLnw80rOZqJzW9YRB";
@@ -199,6 +216,12 @@ export class SessionOrchestrator {
 
   private readonly ownerAudio: OwnerAudioBuffer | null;
   private pendingNativeWordTimes: WordTime[] | null = null;
+  private interviewState: InterviewState | null = null;
+  private lastDirective: Directive | null = null;
+  private lastCallbackBeatId: string | null = null;
+  private devSttEvents: Array<{ type: string; text: string; atMs: number }> = [];
+  private devTurnEndReason = "silence";
+  private planSettled = false;
 
   constructor(deps: OrchestratorDeps) {
     this.deps = deps;
@@ -368,6 +391,21 @@ export class SessionOrchestrator {
 
   /** Generate and speak the opening question, then wait for playback_done. */
   async start(): Promise<void> {
+    // Brief 17: plan in parallel with the opening question, never waited on.
+    if (!this.interviewState) {
+      try { this.interviewState = createInterviewState(buildFallbackPlan(this.deps.scenario)); } catch { this.interviewState = null; }
+      if (this.deps.interviewPlanProvider) {
+        void this.deps.interviewPlanProvider().then((plan) => {
+          this.planSettled = true;
+          if (this.stopped || !this.interviewState) return;
+          // Adopt the generated plan only before the first committed turn.
+          if (this.interviewState.asked.length === 0 && this.interviewState.turn === 0) {
+            this.interviewState = createInterviewState(plan);
+            this.syncInterviewRecord();
+          }
+        }).catch(() => { this.planSettled = true; });
+      } else this.planSettled = true;
+    }
     this.stopped = false;
     if (this.abortController.signal.aborted) this.abortController = new AbortController();
     const t0 = this.now();
@@ -388,6 +426,11 @@ export class SessionOrchestrator {
       const timing = await this.speak(line, t0, t0, t0);
       if (this.stopped) return;
       this.history.push({ role: "reporter", text: line.say });
+      if (this.interviewState) {
+        const first = this.interviewState.beats[0]?.beat;
+        applyCommittedLine(this.interviewState, first ? { ...line, beat_id: line.beat_id ?? first.id } : line, { turn: 0, elapsedSeconds: 0 });
+        this.syncInterviewRecord();
+      }
       this.deps.record?.turns.push({
         role: "reporter",
         text: stripAudioTags(line.say),
@@ -765,7 +808,8 @@ export class SessionOrchestrator {
           sessionDead = true;
         } else if (ev.type === "partial") {
           this.noteSpeech();
-          const text = ev.text.trim();
+          const text = stripTranscriptTokens(ev.text);
+          if (this.deps.devTurnLog) this.devSttEvents.push({ type: "partial", text, atMs: this.now() });
           if (text) {
             this.ownerSpeaking = true;
             if (answerStartedAt === null) answerStartedAt = this.now();
@@ -794,7 +838,8 @@ export class SessionOrchestrator {
           }
           continue;
         } else if (ev.type === "final") {
-          const segment = ev.text.trim();
+          const segment = stripTranscriptTokens(ev.text);
+          if (this.deps.devTurnLog) this.devSttEvents.push({ type: "final", text: segment, atMs: this.now() });
           if (!segment) continue;
           this.noteSpeech();
           this.ownerSpeaking = true;
@@ -859,6 +904,53 @@ export class SessionOrchestrator {
     await this.handleFinal(parts.join(" "), speechEndAt, finalAt);
   }
 
+  private syncInterviewRecord(): void {
+    if (this.interviewState && this.deps.record) {
+      try { this.deps.record.interview = snapshotState(this.interviewState); } catch { /* best effort */ }
+    }
+  }
+
+  get interviewStateSnapshot() { return this.interviewState; }
+
+  /** Directive + prompt context for the next turn, from state and clock. */
+  private interviewContext(escalationBeatId?: string | null): InterviewTurnContext | undefined {
+    const state = this.interviewState;
+    if (!state) return undefined;
+    const elapsed = this.elapsedSeconds();
+    // Contradiction callback: last judgement flagged a contradiction and we
+    // have established facts and a closed beat to return to, once only.
+    let contradictionBeatId: string | null = null;
+    const lastFlags = [...this.history].length >= 0 ? this.lastCommittedFlags : [];
+    if (!state.callbackUsed && state.established.length > 0 && lastFlags.includes("contradiction")) {
+      contradictionBeatId = state.beats.find((b) => isClosedStatus(b.status))?.beat.id ?? null;
+    }
+    const directive = computeDirective(state, {
+      elapsedSeconds: elapsed,
+      durationSeconds: this.isProfile ? this.profileDurationSeconds : 0,
+      ...(escalationBeatId ? { escalationBeatId } : {}),
+      ...(contradictionBeatId ? { contradictionBeatId } : {}),
+    });
+    this.lastDirective = directive;
+    this.lastCallbackBeatId = directive.type === "CALLBACK" ? (directive.nextBeat?.id ?? null) : null;
+    const targetBeat = directive.type === "PUSH" ? directive.activeBeat : directive.nextBeat ?? directive.activeBeat;
+    const fallbackLine = targetBeat ? transitionQuestionForBeat(targetBeat) : { move: "follow_up" as const, flags: [], say: "Let's move on. What happens next?", quote_used: null };
+    return {
+      planLines: state.beats.map((b) => `- ${b.beat.id} [${b.status}, ${b.questions}/${b.beat.max_questions}] ${b.beat.goal} (done when: ${b.beat.done_when})`).join("\n"),
+      activeBeatLine: directive.activeBeat ? `${directive.activeBeat.id}: ${directive.activeBeat.goal} (done when: ${directive.activeBeat.done_when})` : "(none)",
+      directive: `${directive.type}: ${directive.reason}`,
+      nextBeatGoal: directive.nextBeat?.goal ?? targetBeat?.goal ?? "",
+      established: state.established.map((e) => e.text),
+      commitments: state.commitments.map((c) => c.text),
+      openThreads: [...state.open_threads],
+      asked: [...state.asked],
+      closedBeatIds: state.beats.filter((b) => isClosedStatus(b.status)).map((b) => b.beat.id),
+      callbackBeatId: this.lastCallbackBeatId,
+      fallbackLine,
+    };
+  }
+
+  private lastCommittedFlags: ReporterFlag[] = [];
+
   private elapsedSeconds(): number {
     return this.startedAt === null ? 0 : Math.max(0, (this.now() - this.startedAt) / 1000);
   }
@@ -870,6 +962,7 @@ export class SessionOrchestrator {
     if (this.signal.aborted) controller.abort();
     else this.signal.addEventListener("abort", () => controller.abort(), { once: true });
     const history: ConversationTurn[] = [...this.history, { role: "user", text: answer }];
+    const interviewCtx = this.interviewContext();
     const promise = Promise.resolve().then(() =>
       this.deps.brain.nextTurn(
         this.deps.scenario,
@@ -878,6 +971,7 @@ export class SessionOrchestrator {
         this.elapsedSeconds(),
         controller.signal,
         [...this.learnedEscalations],
+        interviewCtx,
       ),
     );
     promise.catch(() => undefined);
@@ -1009,7 +1103,7 @@ export class SessionOrchestrator {
     this.pendingNativeWordTimes = null;
     this.turnIndex += 1;
     this.lastAnswerInterrupted = true;
-    const cutText = req.text.trim();
+    const cutText = stripTranscriptTokens(req.text);
     const display = `${cutText} (cut off)`;
     this.deps.sink.send({ type: "transcript", role: "user", text: display });
     this.history.push({ role: "user", text: cutText });
@@ -1060,7 +1154,7 @@ export class SessionOrchestrator {
     this.pendingNativeWordTimes = null;
     this.lastAnswerInterrupted = false;
     this.turnIndex += 1;
-    const userText = text.trim();
+    const userText = stripTranscriptTokens(text);
     this.deps.sink.send({ type: "transcript", role: "user", text: userText });
     this.history.push({ role: "user", text: userText });
     const userTurn: { role: "user"; text: string; elapsedSeconds: number; flags: ReporterFlag[] } = {
@@ -1092,6 +1186,7 @@ export class SessionOrchestrator {
           elapsedSeconds: this.elapsedSeconds(),
           flags: [],
         });
+        const escBeat = this.interviewState?.beats.find((b) => !isClosedStatus(b.status))?.beat.id ?? null;
         const linePromise = Promise.resolve().then(() =>
           this.deps.brain.nextTurn(
             this.deps.scenario,
@@ -1100,6 +1195,7 @@ export class SessionOrchestrator {
             this.elapsedSeconds(),
             this.signal,
             [...this.learnedEscalations],
+            this.interviewContext(escBeat),
           ),
         );
         linePromise.catch(() => undefined);
@@ -1137,6 +1233,7 @@ export class SessionOrchestrator {
           this.elapsedSeconds(),
           this.signal,
           [...this.learnedEscalations],
+          this.interviewContext(),
         );
         raceWinner = this.deps.brain.lastRaceWinner ?? null;
       }
@@ -1155,6 +1252,7 @@ export class SessionOrchestrator {
           this.elapsedSeconds(),
           this.signal,
           [...this.learnedEscalations],
+          this.interviewContext(),
         );
         raceWinner = this.deps.brain.lastRaceWinner ?? null;
         speculativeBuffer = null;
@@ -1169,6 +1267,28 @@ export class SessionOrchestrator {
     const llmAt = this.now();
     if (this.isProfile && isWrapUpLine(line.say)) this.wrapUpSpoken = true;
     userTurn.flags = [...line.flags];
+    this.lastCommittedFlags = [...line.flags];
+    // Brief 17: state updates ONLY from this committed line.
+    if (this.interviewState) {
+      const isCallback = this.lastDirective?.type === "CALLBACK" && line.beat_id != null && line.beat_id === this.lastCallbackBeatId;
+      applyCommittedLine(this.interviewState, line, { turn: this.turnIndex, elapsedSeconds: this.elapsedSeconds(), ...(isCallback ? { isCallback: true } : {}) });
+      this.syncInterviewRecord();
+    }
+    if (this.deps.devTurnLog) {
+      try {
+        this.deps.devTurnLog({
+          turn: this.turnIndex,
+          at: new Date().toISOString(),
+          sttEvents: [...this.devSttEvents],
+          committedOwnerText: userText,
+          turnEndReason: line.owner_done ? "owner_done" : this.devTurnEndReason,
+          directive: this.lastDirective ? `${this.lastDirective.type}: ${this.lastDirective.reason}` : "none",
+          beatId: line.beat_id ?? null,
+          answerAssessment: line.answer_assessment ?? null,
+        });
+      } catch { /* diagnostics never break a session */ }
+      this.devSttEvents = [];
+    }
     this.deps.record?.turns.push({
       role: "reporter",
       text: stripAudioTags(line.say),

@@ -14,6 +14,9 @@ import { BASETEN_DEFAULT_MODEL, BasetenLlm, ElevenLabsTextToSpeech, HedgedLlm, M
 import { BROWSER_TTS_LABEL } from "./config.js";
 import { requireScenario, ScenarioStore, SCENARIO_EXPIRED_MESSAGE } from "./scenarios/store.js";
 import { SessionOrchestrator } from "./session/orchestrator.js";
+import { generateInterviewPlan } from "./session/interview-plan.js";
+import { appendFileSync, mkdirSync } from "node:fs";
+import nodePath from "node:path";
 import { SessionStore } from "./session/store.js";
 import { voiceFor } from "./voices.js";
 import { attachSessionSocket } from "./ws-session.js";
@@ -83,6 +86,10 @@ wss.on("connection", (ws: WebSocket) => {
         log: (line) => app.log.info(line),
       });
       const record = sessionStore.startSession(scenario, Date.now(), scenarioId);
+      const planLlm = new MetaLlm({ apiKey: config.MODEL_API_KEY, chatModel: config.llmChatModel, chatTimeoutMs: 20_000, structuredTimeoutMs: 20_000 });
+      const devTurnLog = process.env.DEV_TURN_LOG === "1"
+        ? (entry: unknown) => { try { const dir = nodePath.join(config.dataDir, "dev"); mkdirSync(dir, { recursive: true }); appendFileSync(nodePath.join(dir, `turns-${record.id}.jsonl`), `${JSON.stringify(entry)}\n`); } catch { /* best effort */ } }
+        : undefined;
       const brain = new JournalistBrain(llm, prompts, turnModel, (line) => app.log.info(line));
       const interruptDecider = new LlmInterruptDecider(llm, await loadPrompt("interrupt-decision.md"), turnModel);
       const voice = voiceFor(journalist.temperament, journalist.voice);
@@ -115,6 +122,8 @@ wss.on("connection", (ws: WebSocket) => {
             /* best effort */
           }
         },
+        interviewPlanProvider: () => generateInterviewPlan(planLlm, scenario, { model: config.llmStructuredModel, ...(prompts.interviewPlan ? { promptTemplate: prompts.interviewPlan } : {}) }),
+        ...(devTurnLog ? { devTurnLog } : {}),
         log: (line) => app.log.info(line),
         errorLog: (line) => app.log.error(line),
         debugLog: (line) => app.log.debug(line),

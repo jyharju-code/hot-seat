@@ -156,7 +156,7 @@ describe("JournalistBrain", () => {
     expect(llm.lastPrompt).not.toContain("second customer messaged");
   });
 
-  it("passes only the last 6 conversation turns as transcript_tail and logs prompt size", async () => {
+  it("passes the whole conversation as transcript_tail and logs prompt size (brief 17)", async () => {
     const llm = new FakeLlm([VALID]);
     const logs: string[] = [];
     const prompts: JournalistPrompts = {
@@ -170,9 +170,9 @@ describe("JournalistBrain", () => {
       text: `turn-${i}`,
     }));
     await brain.nextTurn(cafeScenario, history, "last");
+    expect(llm.lastPrompt).toContain("turn-0");
     expect(llm.lastPrompt).toContain("turn-4");
     expect(llm.lastPrompt).toContain("turn-9");
-    expect(llm.lastPrompt).not.toContain("turn-3");
     expect(logs.some((l) => l === `[turn] prompt chars=${llm.lastPrompt.length}`)).toBe(true);
   });
 

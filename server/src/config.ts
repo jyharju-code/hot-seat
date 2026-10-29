@@ -33,6 +33,7 @@ const envSchema = z.object({
   IMAGE_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(90_000),
   NEWS_TTS_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(30_000),
   STT_HANDSHAKE_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(20_000),
+  DEV_TURN_LOG: z.preprocess(emptyToUndefined, z.enum(["0", "1"]).optional()),
 });
 
 export const BROWSER_TTS_LABEL = "Text to speech: browser speech synthesis (on-device, not a model call)";
