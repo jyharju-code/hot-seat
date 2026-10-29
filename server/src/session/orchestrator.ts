@@ -46,7 +46,7 @@ export interface OrchestratorDeps {
   voiceId: string;
   /** Partial unchanged for this long starts the speculative call. Default 450. */
   partialStableMs?: number;
-  /** Silence after the last final/partial before the turn ends. Default 1000. */
+  /** Silence after the last final/partial before the turn ends. Default 1400. */
   turnEndSilenceMs?: number;
   /** Extended silence when the answer looks unfinished. Default 3200. */
   turnEndHesitantMs?: number;
@@ -197,6 +197,21 @@ export class SessionOrchestrator {
     raceWinner: "meta" | "baseten" | null;
   } | null = null;
   private awaitingPlayback = false;
+  /** Browser TTS only: true once the client reports the line started playing. */
+  private reporterSpeechStarted = false;
+  /**
+   * Brief 18 late-continuation window (browser TTS only): while the reply to
+   * a committed answer is still unsaid, a second STT session listens for an
+   * owner who resumed mid-answer. Late speech aborts the unsent reply and
+   * the joined text is committed as one answer. The window closes when the
+   * reporter line is sent, so the reporter is never cut off mid-line.
+   */
+  private lateSession: SttSession | null = null;
+  private lateController: AbortController | null = null;
+  private lateAnswer: string | null = null;
+  private lateSpeechText: string | null = null;
+  /** Seed for the next listening turn: a joined answer awaiting its ending. */
+  private continuationPrefix: string | null = null;
   private keepAlive: SttKeepAliveTracker | null = null;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private readonly firedEscalations = new Set<number>();
@@ -486,7 +501,28 @@ export class SessionOrchestrator {
   private radioHint(): VoiceHint { return { role: "radio" }; }
   /** Client-reported first-sound latency in browser mode. */
   speechStarted(speechStartMs?: number): void {
+    this.reporterSpeechStarted = true;
+    this.stopLateListening();
     this.log(`[timing] speech_started speechStartMs=${speechStartMs !== undefined ? Math.round(speechStartMs) : "unknown"}`);
+  }
+
+  /** Client reports its speech queue stalled (brief 18): log it and note it
+   *  in the dev turn log. The line stays on screen and the interview moves on. */
+  speechFailed(reason: "no_start" | "error"): void {
+    this.log(`[speech] browser speech failed reason=${reason}`);
+    if (!this.deps.devTurnLog) return;
+    try {
+      this.deps.devTurnLog({
+        turn: this.turnIndex,
+        at: new Date().toISOString(),
+        sttEvents: [],
+        committedOwnerText: "",
+        turnEndReason: `speech_failed:${reason}`,
+        directive: this.lastDirective ? `${this.lastDirective.type}: ${this.lastDirective.reason}` : "none",
+        beatId: null,
+        answerAssessment: null,
+      });
+    } catch { /* diagnostics never break a session */ }
   }
 
   /** Client finished playing the reporter audio: only now open STT. */
@@ -496,8 +532,15 @@ export class SessionOrchestrator {
     await this.beginListening();
   }
 
-  /** Forward one mic frame. Dropped unless listening (half duplex). */
+  /** Forward one mic frame. Dropped unless listening (half duplex), except
+   *  inside the late-continuation window, where it feeds the late session. */
   pushAudio(pcm: Uint8Array): void {
+    if (this.lateSession && !this.reporterSpeechStarted) {
+      try {
+        this.lateSession.push(pcm);
+      } catch { /* session teardown handles failures */ }
+      return;
+    }
     if (this.state !== "listening" || !this.sttSession) return;
     this.ownerAudio?.push(pcm, this.now());
     this.keepAlive?.noteFrame(pcm.length);
@@ -509,6 +552,7 @@ export class SessionOrchestrator {
     this.ownerSpeaking = false;
     this.awaitingPlayback = false;
     this.abortController.abort();
+    this.stopLateListening();
     this.abortSpeculative();
     this.clearTimers();
     this.stopKeepAlive();
@@ -639,7 +683,10 @@ export class SessionOrchestrator {
   private async consumeStt(): Promise<void> {
     const silenceMs = this.deps.turnEndSilenceMs ?? DEFAULT_TURN_END_SILENCE_MS;
     const hesitantMs = this.deps.turnEndHesitantMs ?? DEFAULT_TURN_END_HESITANT_MS;
-    const parts: string[] = [];
+    // A late continuation seeds the resumed answer: the joined text counts
+    // as already collected, so the turn ends (and commits) the full answer.
+    const parts: string[] = this.continuationPrefix ? [this.continuationPrefix] : [];
+    this.continuationPrefix = null;
     let lastFinalAt: number | null = null;
     let lastEndpointAt: number | null = null;
     // Last speech activity of any kind. The timing origin: an endpoint can be
@@ -1045,6 +1092,112 @@ export class SessionOrchestrator {
     this.speculative = null;
   }
 
+  /**
+   * Open the late-continuation window for a just-committed answer (browser
+   * TTS only, best effort). The window closes at stopLateListening: when
+   * the reporter line is sent, when speech starts, or on stop.
+   */
+  private startLateListening(answer: string): void {
+    this.stopLateListening();
+    if (!this.isBrowserTts || this.stopped) return;
+    this.reporterSpeechStarted = false;
+    this.lateAnswer = answer;
+    this.lateSpeechText = null;
+    const controller = new AbortController();
+    if (this.signal.aborted) controller.abort();
+    else this.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    this.lateController = controller;
+    void (async () => {
+      let session: SttSession | null = null;
+      try {
+        session = await this.deps.stt.openSession();
+      } catch {
+        return;
+      }
+      if (this.stopped || this.lateController !== controller) {
+        try {
+          session.close();
+        } catch { /* best effort */ }
+        return;
+      }
+      this.lateSession = session;
+      await this.watchLateSession(session, controller);
+    })();
+  }
+
+  private async watchLateSession(session: SttSession, controller: AbortController): Promise<void> {
+    try {
+      for await (const ev of session.events()) {
+        if (this.lateSession !== session || this.stopped || controller.signal.aborted) return;
+        if (this.reporterSpeechStarted) return;
+        if (ev.type === "partial" || ev.type === "final") {
+          const text = stripTranscriptTokens(ev.text);
+          if (text.trim()) {
+            this.onLateSpeech(text);
+            return;
+          }
+        }
+      }
+    } catch { /* session teardown ends the watch */ }
+  }
+
+  private onLateSpeech(text: string): void {
+    if (this.lateSession === null || this.reporterSpeechStarted || this.lateSpeechText !== null) return;
+    this.lateSpeechText = text;
+    this.log(`[turn] late owner speech before reporter audio: ${JSON.stringify(text.slice(0, 80))}`);
+    try {
+      this.lateController?.abort();
+    } catch { /* best effort */ }
+  }
+
+  /** Joined answer when late speech arrived inside the window, else null.
+   *  Only valid before the reporter line is sent. */
+  private takeLateContinuation(): string | null {
+    if (this.lateSession === null || this.reporterSpeechStarted) return null;
+    if (this.lateSpeechText === null || this.lateAnswer === null) return null;
+    const joined = `${this.lateAnswer} ${this.lateSpeechText}`.trim();
+    this.lateSpeechText = null;
+    return joined;
+  }
+
+  private stopLateListening(): void {
+    const session = this.lateSession;
+    this.lateSession = null;
+    this.lateController = null;
+    this.lateAnswer = null;
+    this.lateSpeechText = null;
+    if (session) {
+      try {
+        session.end();
+      } catch { /* best effort */ }
+      try {
+        session.close();
+      } catch { /* best effort */ }
+    }
+  }
+
+  /** Abort signal for this turn's reply: session stop or late owner speech. */
+  private lateSignal(): AbortSignal | undefined {
+    return this.lateController?.signal;
+  }
+
+  /**
+   * Late speech aborted the unsent reply: retract the premature commit and
+   * keep listening, seeded with the joined text, so the resumed answer is
+   * committed (and replied to) as one answer.
+   */
+  private async continueAfterLateSpeech(joined: string): Promise<void> {
+    const last = this.history[this.history.length - 1];
+    if (last?.role === "user") this.history.pop();
+    const turns = this.deps.record?.turns;
+    if (turns?.length && turns[turns.length - 1]?.role === "user") turns.pop();
+    this.turnIndex = Math.max(0, this.turnIndex - 1);
+    this.abortSpeculative();
+    this.log(`[turn] late continuation, joined answer: ${JSON.stringify(joined.slice(0, 80))}`);
+    this.continuationPrefix = joined;
+    await this.beginListening();
+  }
+
   /** Earliest unfired escalation whose (scaled) time has passed, if any. */
   private takeDueEscalation(): Escalation | null {
     if (this.isProfile) return null;
@@ -1191,6 +1344,10 @@ export class SessionOrchestrator {
     };
     this.deps.record?.turns.push(userTurn);
     this.setState("thinking");
+    // Late-continuation window (brief 18, browser TTS only): the owner may
+    // resume mid-answer while this reply is still unsaid.
+    this.startLateListening(userText);
+    const replySignal = this.lateSignal() ?? this.signal;
     // Turn boundary: at most one escalation fires here, before the reply.
     const escalation = this.takeDueEscalation();
     let line: ReporterLine;
@@ -1219,7 +1376,7 @@ export class SessionOrchestrator {
             [...this.history],
             userText,
             this.elapsedSeconds(),
-            this.signal,
+            replySignal,
             [...this.learnedEscalations],
             this.interviewContext(escBeat),
           ),
@@ -1257,7 +1414,7 @@ export class SessionOrchestrator {
           [...this.history],
           userText,
           this.elapsedSeconds(),
-          this.signal,
+          replySignal,
           [...this.learnedEscalations],
           this.interviewContext(),
         );
@@ -1266,6 +1423,14 @@ export class SessionOrchestrator {
       if (this.stopped) return;
     } catch (err) {
       if (this.stopped) return;
+      // The owner resumed mid-answer: the reply is stale before it was
+      // ever sent. Join the texts and keep listening instead of retrying.
+      const lateJoined = this.takeLateContinuation();
+      if (lateJoined !== null) {
+        this.stopLateListening();
+        await this.continueAfterLateSpeech(lateJoined);
+        return;
+      }
       // One fresh turn-LLM retry, if this turn is still current.
       this.logFail("turn_llm", err);
       const turnAtStart = this.turnIndex;
@@ -1276,7 +1441,7 @@ export class SessionOrchestrator {
           [...this.history],
           userText,
           this.elapsedSeconds(),
-          this.signal,
+          replySignal,
           [...this.learnedEscalations],
           this.interviewContext(),
         );
@@ -1289,6 +1454,14 @@ export class SessionOrchestrator {
         await this.recoverTurn("turn_llm", err2);
         return;
       }
+    }
+    // Late speech arrived while the reply was still unsaid: drop the stale
+    // reply, keep listening, and commit the joined text as one answer.
+    const lateJoined = this.takeLateContinuation();
+    if (lateJoined !== null) {
+      this.stopLateListening();
+      await this.continueAfterLateSpeech(lateJoined);
+      return;
     }
     const llmAt = this.now();
     // Brief 17b validation: no goodbye before profile wrap-up, no repeated
@@ -1343,10 +1516,13 @@ export class SessionOrchestrator {
     try {
       timing = await this.speak(line, speechEndAt, finalAt, llmAt, speculativeBuffer, partialStartUsed, raceWinner);
     } catch (err) {
+      // The line is sent (or failed): the late window is over either way.
+      this.stopLateListening();
       if (this.stopped) return;
       await this.recoverTurn("tts", err);
       return;
     }
+    this.stopLateListening();
     if (this.stopped) return;
     this.deps.sink.send({ type: "timing", timing });
     this.log(

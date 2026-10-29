@@ -385,25 +385,42 @@ describe("SessionOrchestrator (fake adapters)", () => {
     await orch.stop();
   });
 
-  it("owner_done true ends hesitant wording at the normal window and flushes speculative TTS", async () => {
+  it("owner_done true ends a long answer at the normal window and flushes speculative TTS", async () => {
     const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const { stt, tts, messages, audio, orch } = await started({
       turnEndSilenceMs: 100,
       turnEndHesitantMs: 800,
       nextTurn: async () => ({ ...parseReporterLine(VALID), owner_done: true }),
     });
+    const answer = "Well, the thing is we closed the cafe that morning directly.";
     const openingAudio = audio.length;
-    stt.sessions[0]!.emit({ type: "final", text: "well, so the thing is I, let me think." });
+    stt.sessions[0]!.emit({ type: "final", text: answer });
     await wait(30);
     // Speculative TTS has started but no audio has been sent before turn end.
     expect(tts.texts.length).toBeGreaterThan(1);
     expect(audio.length).toBe(openingAudio);
     await wait(250);
-    expect(messages).toContainEqual({ type: "transcript", role: "user", text: "well, so the thing is I, let me think." });
+    expect(messages).toContainEqual({ type: "transcript", role: "user", text: answer });
     expect(audio.length).toBeGreaterThan(openingAudio);
     const timing = messages.filter((m) => m.type === "timing").at(-1);
     if (!timing || timing.type !== "timing") throw new Error("expected timing");
     expect(timing.timing.speculativeTtsUsed).toBe(true);
+    await orch.stop();
+  });
+
+  it("owner_done true still waits the hesitant window for a short answer (brief 18)", async () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const { stt, messages, orch } = await started({
+      turnEndSilenceMs: 100,
+      turnEndHesitantMs: 800,
+      nextTurn: async () => ({ ...parseReporterLine(VALID), owner_done: true }),
+    });
+    stt.sessions[0]!.emit({ type: "final", text: "was the vision" });
+    await wait(250);
+    // The normal window passed, but the two-word answer is not done yet.
+    expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
+    await wait(700);
+    expect(messages).toContainEqual({ type: "transcript", role: "user", text: "was the vision" });
     await orch.stop();
   });
 
@@ -442,16 +459,16 @@ describe("SessionOrchestrator (fake adapters)", () => {
     const s = stt.sessions[0]!;
     s.emit({ type: "final", text: "Yeah, yeah," });
     await wait(150);
-    s.emit({ type: "final", text: "we refunded everyone that morning." });
+    s.emit({ type: "final", text: "we refunded everyone that morning in full." });
     await wait(150);
     expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(false);
     await wait(300);
     expect(messages).toContainEqual({
       type: "transcript",
       role: "user",
-      text: "Yeah, yeah, we refunded everyone that morning.",
+      text: "Yeah, yeah, we refunded everyone that morning in full.",
     });
-    expect(calls).toEqual(["Yeah, yeah,", "Yeah, yeah, we refunded everyone that morning."]);
+    expect(calls).toEqual(["Yeah, yeah,", "Yeah, yeah, we refunded everyone that morning in full."]);
     await orch.stop();
   });
 
@@ -571,6 +588,93 @@ describe("SessionOrchestrator (fake adapters)", () => {
     // Listening again on the fresh session: pushes flow there.
     orch.pushAudio(new Uint8Array([3]));
     expect(stt.sessions[stt.sessions.length - 1]!.pushed).toHaveLength(1);
+  });
+
+  async function startedBrowser(opts: { turnEndSilenceMs?: number; turnEndHesitantMs?: number; gateFirstReply?: boolean } = {}) {
+    const stt = new FakeStt();
+    const tts = new FakeTts();
+    const { messages, audio, sink } = makeSink();
+    const brainCalls: string[] = [];
+    let calls = 0;
+    let releaseFirst!: (line: ReporterLine) => void;
+    const firstGate = new Promise<ReporterLine>((r) => {
+      releaseFirst = r;
+    });
+    const brain = {
+      openingQuestion: async () => OPENING,
+      nextTurn: async (_s: unknown, _h: unknown, answer: string) => {
+        brainCalls.push(answer);
+        calls += 1;
+        if (opts.gateFirstReply && calls === 1) return firstGate;
+        return parseReporterLine(VALID);
+      },
+    };
+    const logs: string[] = [];
+    const devEntries: Array<{ turnEndReason: string }> = [];
+    const orch = new SessionOrchestrator({
+      stt,
+      brain: brain as never,
+      tts,
+      ttsProvider: "browser",
+      sink,
+      scenario: cafeScenario,
+      voiceId: "voice-1",
+      turnEndSilenceMs: opts.turnEndSilenceMs ?? 50,
+      turnEndHesitantMs: opts.turnEndHesitantMs ?? 50,
+      log: (l) => logs.push(l),
+      devTurnLog: (e) => devEntries.push(e),
+    });
+    await orch.start();
+    await orch.playbackDone();
+    return { stt, tts, messages, audio, orch, logs, devEntries, brainCalls, releaseFirst };
+  }
+
+  it("late owner speech before the reply is sent aborts it and commits one joined answer (brief 18)", async () => {
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const { stt, messages, orch, logs, brainCalls, releaseFirst } = await startedBrowser({ gateFirstReply: true });
+    stt.sessions[0]!.emit({ type: "final", text: "was the vision" });
+    // The turn ends and the reply model call starts; a late session opens.
+    await vi.waitFor(() => expect(stt.sessions.length).toBe(2));
+    // Mic frames during thinking feed the late session, not the old turn session.
+    orch.pushAudio(new Uint8Array([1, 2]));
+    expect(stt.sessions[1]!.pushed).toHaveLength(1);
+    expect(stt.sessions[0]!.pushed).toHaveLength(0);
+    stt.sessions[1]!.emit({ type: "partial", text: "and it cost us everything" });
+    await wait(20);
+    // The held model call resolves, but its reply is stale and never sent.
+    releaseFirst({ ...parseReporterLine(VALID), say: "Stale reply never sent." });
+    await vi.waitFor(() => expect(brainCalls).toHaveLength(2));
+    expect(brainCalls[1]).toBe("was the vision and it cost us everything");
+    expect(messages.some((m) => m.type === "reporter_line" && m.line.say.includes("Stale reply"))).toBe(false);
+    // The resumed answer ends on silence and is committed and replied to once.
+    await vi.waitFor(() => expect(messages.filter((m) => m.type === "reporter_line")).toHaveLength(2));
+    expect(messages).toContainEqual({
+      type: "transcript",
+      role: "user",
+      text: "was the vision and it cost us everything",
+    });
+    expect(logs.some((l) => l.includes("late continuation"))).toBe(true);
+    await orch.playbackDone();
+    await orch.stop();
+  });
+
+  it("speech_failed is logged and written to the dev turn log (brief 18)", async () => {
+    const { orch, logs, devEntries } = await startedBrowser();
+    orch.speechFailed("no_start");
+    expect(logs.some((l) => l.includes("reason=no_start"))).toBe(true);
+    expect(devEntries.some((e) => e.turnEndReason === "speech_failed:no_start")).toBe(true);
+    orch.speechFailed("error");
+    expect(devEntries.some((e) => e.turnEndReason === "speech_failed:error")).toBe(true);
+    await orch.stop();
+  });
+
+  it("opens no late STT session on the legacy audio path", async () => {
+    const { stt, messages, orch } = await started();
+    stt.sessions[0]!.emit({ type: "final", text: "We fixed it." });
+    await vi.waitFor(() => expect(messages.some((m) => m.type === "transcript" && m.role === "user")).toBe(true));
+    expect(stt.sessions.length).toBe(1);
+    await orch.playbackDone();
+    await orch.stop();
   });
 });
 

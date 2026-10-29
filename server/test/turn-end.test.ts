@@ -5,26 +5,64 @@ import {
   TURN_END_HESITANT_MS,
   TURN_END_SILENCE_MS,
   cappedTurnEndSilenceMs,
+  isClearOneWordReply,
   isHesitantAnswer,
   normaliseTranscript,
+  ownerDoneShortensWait,
   transcriptWordCount,
   transcriptsMatchNormalised,
   turnEndSilenceMs,
 } from "../src/session/turn-end.js";
 
 describe("adaptive turn-end silence", () => {
-  it("defaults: 1000 ms complete, 3200 ms hesitant", () => {
-    expect(TURN_END_SILENCE_MS).toBe(1000);
+  it("defaults: 1400 ms complete, 3200 ms hesitant", () => {
+    expect(TURN_END_SILENCE_MS).toBe(1400);
     expect(TURN_END_HESITANT_MS).toBe(3200);
     const complete = "We closed the cafe that morning and told every customer directly.";
     expect(isHesitantAnswer(complete)).toBe(false);
-    expect(turnEndSilenceMs(complete)).toBe(1000);
+    expect(turnEndSilenceMs(complete)).toBe(1400);
     expect(turnEndSilenceMs("well, so the thing is I, let me think.")).toBe(3200);
   });
 
-  it("owner_done true ends at the normal window even for hesitant wording", () => {
-    expect(turnEndSilenceMs("well, so the thing is I, let me think.", {}, true)).toBe(1000);
-    expect(turnEndSilenceMs("We closed it.", { silenceMs: 100, hesitantMs: 900 }, true)).toBe(100);
+  it("owner_done true ends a long answer at the normal window", () => {
+    const long = "We closed the cafe that morning and told every customer directly.";
+    expect(turnEndSilenceMs(long, {}, true)).toBe(1400);
+    expect(turnEndSilenceMs(long, { silenceMs: 100, hesitantMs: 900 }, true)).toBe(100);
+  });
+
+  it("owner_done true waits the hesitant window for a short answer (brief 18)", () => {
+    // A pause after the first words usually means finding words, not done.
+    expect(turnEndSilenceMs("was the vision", {}, true)).toBe(TURN_END_HESITANT_MS);
+    expect(turnEndSilenceMs("my dream?", {}, true)).toBe(TURN_END_HESITANT_MS);
+    expect(turnEndSilenceMs("We closed it.", { silenceMs: 100, hesitantMs: 900 }, true)).toBe(900);
+    // Nine words, so owner_done still shortens it despite the filler ending.
+    expect(turnEndSilenceMs("well, so the thing is I, let me think.", {}, true)).toBe(TURN_END_SILENCE_MS);
+    expect(turnEndSilenceMs("well, so the thing is I", {}, true)).toBe(TURN_END_HESITANT_MS);
+  });
+
+  it("owner_done true shortens only at 8+ words, or a clear one-word yes/no reply", () => {
+    const seven = "We closed the cafe that morning and";
+    const eight = "We closed the cafe that morning and told";
+    expect(seven.split(" ")).toHaveLength(7);
+    expect(eight.split(" ")).toHaveLength(8);
+    expect(turnEndSilenceMs(seven, {}, true)).toBe(TURN_END_HESITANT_MS);
+    expect(turnEndSilenceMs(eight, {}, true)).toBe(TURN_END_SILENCE_MS);
+    for (const reply of ["yes", "Yes.", "no", "sure", "correct", "Nope"]) {
+      expect(turnEndSilenceMs(reply, {}, true)).toBe(TURN_END_SILENCE_MS);
+    }
+    // Not a yes/no reply: still hesitant under 8 words.
+    expect(turnEndSilenceMs("maybe", {}, true)).toBe(TURN_END_HESITANT_MS);
+    expect(turnEndSilenceMs("the vision", {}, true)).toBe(TURN_END_HESITANT_MS);
+  });
+
+  it("one-word reply matching ignores casing and punctuation", () => {
+    expect(isClearOneWordReply("Yes.")).toBe(true);
+    expect(isClearOneWordReply("  NO ")).toBe(true);
+    expect(isClearOneWordReply("yes please")).toBe(false);
+    expect(isClearOneWordReply("")).toBe(false);
+    expect(ownerDoneShortensWait("We closed the cafe that morning and told customers")).toBe(true);
+    expect(ownerDoneShortensWait("was the vision")).toBe(false);
+    expect(ownerDoneShortensWait("sure")).toBe(true);
   });
 
   it("owner_done false waits the hesitant window even for a complete sentence", () => {
@@ -35,8 +73,8 @@ describe("adaptive turn-end silence", () => {
 
   it("owner_done not arrived falls back to the word heuristic", () => {
     const complete = "We closed the cafe that morning and told every customer directly.";
-    expect(turnEndSilenceMs(complete, {}, null)).toBe(1000);
-    expect(turnEndSilenceMs(complete, {}, undefined)).toBe(1000);
+    expect(turnEndSilenceMs(complete, {}, null)).toBe(1400);
+    expect(turnEndSilenceMs(complete, {}, undefined)).toBe(1400);
     expect(turnEndSilenceMs("well, so the thing is I, let me think.", {}, null)).toBe(3200);
   });
 
@@ -49,17 +87,20 @@ describe("adaptive turn-end silence", () => {
 
   it("arrived speculative result decides: true at normal window, false or missing judgement waits or uses heuristic", () => {
     const complete = "We closed the cafe that morning and told every customer directly.";
-    expect(turnEndSilenceMs("Yeah, yeah,", {}, { kind: "done", ownerDone: true })).toBe(1000);
+    expect(turnEndSilenceMs(complete, {}, { kind: "done", ownerDone: true })).toBe(1400);
+    // Short answer: owner_done true still waits the hesitant window (brief 18).
+    expect(turnEndSilenceMs("Yeah, yeah,", {}, { kind: "done", ownerDone: true })).toBe(3200);
+    expect(turnEndSilenceMs("yes", {}, { kind: "done", ownerDone: true })).toBe(1400);
     expect(turnEndSilenceMs(complete, {}, { kind: "done", ownerDone: false })).toBe(3200);
-    expect(turnEndSilenceMs(complete, {}, { kind: "done", ownerDone: null })).toBe(1000);
+    expect(turnEndSilenceMs(complete, {}, { kind: "done", ownerDone: null })).toBe(1400);
     expect(turnEndSilenceMs("well, so the thing is I, let me think.", {}, { kind: "done", ownerDone: null })).toBe(3200);
   });
 
   it("failed speculative call falls back to the word heuristic", () => {
     const complete = "We closed the cafe that morning and told every customer directly.";
-    expect(turnEndSilenceMs(complete, {}, { kind: "failed" })).toBe(1000);
+    expect(turnEndSilenceMs(complete, {}, { kind: "failed" })).toBe(1400);
     expect(turnEndSilenceMs("Yeah, yeah,", {}, { kind: "failed" })).toBe(3200);
-    expect(turnEndSilenceMs(complete, {}, "failed")).toBe(1000);
+    expect(turnEndSilenceMs(complete, {}, "failed")).toBe(1400);
   });
 
   it("under 8 words is hesitant even with a full stop", () => {
