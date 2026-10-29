@@ -70,6 +70,9 @@ export const reporterFlagSchema = z.enum([
 ]);
 export type ReporterFlag = z.infer<typeof reporterFlagSchema>;
 
+export const answerAssessmentSchema = z.enum(["answered", "partial", "dodged", "off_topic"]);
+export type AnswerAssessment = z.infer<typeof answerAssessmentSchema>;
+
 export const reporterLineSchema = z.object({
   move: reporterMoveSchema,
   flags: z.array(reporterFlagSchema),
@@ -81,8 +84,61 @@ export const reporterLineSchema = z.object({
   quote_harvest: z.string().nullable().optional(),
   /** Profile mode only, hidden from UI: story angle the reporter is quietly building. */
   angle: z.string().nullable().optional(),
+  /** Brief 17: which interview beat this line serves. Optional so old records parse. */
+  beat_id: z.string().min(1).optional(),
+  /** Brief 17: judgement of the owner's last answer. */
+  answer_assessment: answerAssessmentSchema.optional(),
+  /** Brief 17: 0 to 3 short facts established by the owner's last answer. */
+  new_established: z.array(z.string().min(1)).max(3).optional(),
+  new_commitment: z.string().min(1).nullable().optional(),
+  new_open_thread: z.string().min(1).nullable().optional(),
 });
 export type ReporterLine = z.infer<typeof reporterLineSchema>;
+
+// ---------------------------------------------------------------------------
+// Interview plan and state (Brief 17)
+// ---------------------------------------------------------------------------
+
+export const hotSeatBeatKindSchema = z.enum(["facts", "responsibility", "landmine", "human_impact", "action", "close"]);
+export const profileBeatKindSchema = z.enum(["origin", "business_today", "hard_years", "people", "future", "close"]);
+export const beatKindSchema = z.union([hotSeatBeatKindSchema, profileBeatKindSchema]);
+export type BeatKind = z.infer<typeof beatKindSchema>;
+
+export const beatStatusSchema = z.enum(["open", "active", "answered", "dodged", "exhausted"]);
+export type BeatStatus = z.infer<typeof beatStatusSchema>;
+
+export const interviewBeatSchema = z.object({
+  id: z.string().min(1),
+  goal: z.string().min(1),
+  done_when: z.string().min(1),
+  max_questions: z.union([z.literal(2), z.literal(3)]),
+  unlock_at_seconds: z.number().nonnegative().optional(),
+  landmine_id: z.string().min(1).optional(),
+  kind: beatKindSchema,
+});
+export type InterviewBeat = z.infer<typeof interviewBeatSchema>;
+
+export const interviewPlanSchema = z.object({
+  beats: z.array(interviewBeatSchema).min(5).max(7),
+});
+export type InterviewPlan = z.infer<typeof interviewPlanSchema>;
+
+export interface InterviewBeatState {
+  beat: InterviewBeat;
+  status: BeatStatus;
+  questions: number;
+}
+
+export interface EstablishedFact { text: string; turn: number }
+export interface Commitment { text: string; turn: number }
+
+export interface InterviewMapRow {
+  id: string;
+  goal: string;
+  status: BeatStatus;
+  questions: number;
+  kind: BeatKind;
+}
 
 /** Gentle client notice for a recovered connection failure (not a raw provider error). */
 export const CONNECTION_HICCUP_MESSAGE = "Connection hiccup, carrying on.";
@@ -445,6 +501,10 @@ export type FrontPageResult =
 export interface DebriefResponse {
   debrief: Debrief;
   frontPage: FrontPageResult | null;
+  /** Brief 17 interview map. Optional so old responses parse. */
+  interviewMap?: InterviewMapRow[];
+  interviewRepeatCount?: number;
+  interviewLongestRun?: number;
 }
 
 /** Format elapsed seconds as mm:ss from session start. */
@@ -468,6 +528,12 @@ export function tagProsody(text: string): { rate: number; pitch: number } {
   if (/hesitat|pause|sigh/.test(tag)) return { rate: 0.9, pitch: 0.95 };
   return { rate: 1, pitch: 1 };
 }
+
+/** Strip leaked STT speaker/control tokens such as `<|speaker_A|>` from transcripts. */
+export function stripTranscriptTokens(text: string): string {
+  return text.replace(/<\|[^|]*\|>/g, " ").replace(/[^\S\n]+/g, " ").trim();
+}
+export const cleanTranscriptText = stripTranscriptTokens;
 
 /** Strip ElevenLabs audio tags (e.g. `[sharply]`) for display. TTS keeps the raw text. */
 export function stripAudioTags(text: string): string {
