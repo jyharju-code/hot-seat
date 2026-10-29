@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { DebriefNews, GeneratedScenario, NewsClipResponse, NewsTimelinePart } from "@hot-seat/shared";
+import { BrowserSpeech } from "./audio/browser-speech.js";
 
 export function partAtTime(timeline: readonly NewsTimelinePart[], ms: number): NewsTimelinePart | null {
   return timeline.find((p) => ms >= p.startMs && ms < p.endMs) ?? timeline[timeline.length - 1] ?? null;
@@ -70,6 +71,8 @@ export function NewsPlayer({
   const [building, setBuilding] = useState(true);
   const [failed, setFailed] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [browserPart, setBrowserPart] = useState<"intro"|"soundbite"|"outro">("intro");
+  const speechRef = useRef<BrowserSpeech | null>(null); if (!speechRef.current) speechRef.current = new BrowserSpeech();
   const [recording, setRecording] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -136,7 +139,7 @@ export function NewsPlayer({
       if (canvas && ctx) {
         const audio = audioRef.current;
         const ms = audio ? audio.currentTime * 1000 : 0;
-        const part = partAtTime(clip.timeline, ms);
+        const part = clip.ttsMode === "browser" ? (clip.timeline.find((p) => p.part === browserPart) ?? partAtTime(clip.timeline, ms)) : partAtTime(clip.timeline, ms);
         const partProgress = part
           ? Math.min(1, Math.max(0, (ms - part.startMs) / Math.max(1, part.endMs - part.startMs)))
           : 0;
@@ -201,18 +204,24 @@ export function NewsPlayer({
     };
     raf = window.requestAnimationFrame(draw);
     return () => window.cancelAnimationFrame(raf);
-  }, [clip, news.soundbite, scenario.company.name, scenario.spokesperson_role]);
+  }, [clip, news.soundbite, scenario.company.name, scenario.spokesperson_role, browserPart]);
 
+  const speakPart = (text: string) => new Promise<void>((resolve) => { speechRef.current?.speak(text, { role: "anchor" }, { onDone: resolve }); });
   const togglePlay = () => {
     const audio = audioRef.current;
     if (!audio) return;
-    if (audio.paused) {
-      void audio.play();
+    if (clip?.ttsMode === "browser") {
+      if (playing) { speechRef.current?.cancel(); audio.pause(); setPlaying(false); return; }
       setPlaying(true);
-    } else {
-      audio.pause();
-      setPlaying(false);
+      void (async () => {
+        setBrowserPart("intro"); if (clip.anchorIntro) await speakPart(clip.anchorIntro);
+        setBrowserPart("soundbite"); try { audio.currentTime = 0; await audio.play(); await new Promise<void>((r) => audio.addEventListener("ended", () => r(), { once: true })); } catch { /* no soundbite */ }
+        setBrowserPart("outro"); if (clip.anchorOutro) await speakPart(clip.anchorOutro);
+        setPlaying(false);
+      })();
+      return;
     }
+    if (audio.paused) { void audio.play(); setPlaying(true); } else { audio.pause(); setPlaying(false); }
   };
 
   const saveClip = async () => {
@@ -300,7 +309,7 @@ export function NewsPlayer({
       </div>
       <audio
         ref={audioRef}
-        src={clip.audioUrl}
+        src={clip.ttsMode === "browser" ? (clip.soundbiteAudioUrl ?? clip.audioUrl) : clip.audioUrl}
         preload="auto"
         onEnded={() => setPlaying(false)}
         onPause={() => setPlaying(false)}
@@ -314,9 +323,13 @@ export function NewsPlayer({
           {recording ? "Recording." : "Save clip"}
         </button>
       </p>
-      {!clip.soundbiteLocated && (
+      {!clip.soundbiteLocated && clip.ttsMode !== "browser" && (
         <p className="muted">Your words are read by the anchor in this one.</p>
       )}
+      {clip.ttsMode === "browser" && (
+        <p className="muted">{browserPart === "intro" ? (clip.anchorIntro ?? news.anchor_intro) : browserPart === "outro" ? (clip.anchorOutro ?? news.anchor_outro) : news.soundbite}</p>
+      )}
+      {clip.ttsMode === "browser" && <p className="muted">Saved clip has no anchor voice: it contains the video, your soundbite and the anchor lines as captions.</p>}
       <p className="muted">Your recording is used only for this clip and is not kept.</p>
     </section>
   );

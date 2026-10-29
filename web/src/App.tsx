@@ -248,6 +248,7 @@ export function App() {
               ))}
             </p>
           )}
+          <p className="muted">Tip: for the best voices, install an Enhanced English voice in your system settings.</p>
           <p>
             <button className="primary" type="button" disabled={description.trim().length < 10} onClick={() => build(description.trim())}>
               Build my scenario

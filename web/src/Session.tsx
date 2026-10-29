@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReporterLine, ServerMessage, SessionState, TurnTiming } from "@hot-seat/shared";
 import { CONNECTION_HICCUP_MESSAGE, serverMessageSchema, stripAudioTags } from "@hot-seat/shared";
 import { PcmPlayer } from "./audio/pcm-player.js";
+import { BrowserSpeech } from "./audio/browser-speech.js";
 import { connectionLostUpdate } from "./session-connection.js";
 
 interface Entry { role: "user" | "reporter" | "news"; text: string; timing?: TurnTiming }
@@ -44,6 +45,18 @@ export function Session({
   const endTimerRef = useRef<number | undefined>(undefined);
   const cleanupRef = useRef<(() => void) | null>(null);
   const stillRef = useRef<CameraStill | null>(null);
+  const speechRef = useRef<BrowserSpeech | null>(null);
+  const browserLineRef = useRef(false);
+  const lineSentAtRef = useRef(0);
+  if (!speechRef.current) speechRef.current = new BrowserSpeech();
+  const sendPlaybackDone = () => { const ws = wsRef.current; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "playback_done" })); };
+  const speakBrowser = (text: string, hint: Parameters<BrowserSpeech["speak"]>[1], done: boolean) => {
+    browserLineRef.current = true; lineSentAtRef.current = performance.now();
+    speechRef.current?.speak(text, hint, {
+      onStart: () => { const ws = wsRef.current; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "speech_started", speechStartMs: Math.round(performance.now() - lineSentAtRef.current) })); },
+      onDone: () => { if (done) { browserLineRef.current = false; sendPlaybackDone(); } },
+    });
+  };
 
   useEffect(() => { stateRef.current = state; }, [state]);
   useEffect(() => {
@@ -174,16 +187,17 @@ export function Session({
       window.setTimeout(() => end(), 600);
     }
     else if (msg.type === "interrupt") {
-      // Stop sending mic audio (state is no longer listening) and play the cut-in.
       setState("speaking");
       stateRef.current = "speaking";
       playerRef.current?.beginLine();
       setQuestion(stripAudioTags(msg.say));
+      if (msg.voiceHint) speakBrowser(msg.say, msg.voiceHint, true);
     }
     else if (msg.type === "state") setState(msg.state);
     else if (msg.type === "news_flash") {
       setNewsFlash(msg.text);
       setEntries((e) => [...e, { role: "news", text: msg.text }]);
+      if (msg.voiceHint) speakBrowser(msg.text, msg.voiceHint, false);
     }
     else if (msg.type === "transcript") {
       const display = stripAudioTags(msg.text);
@@ -192,7 +206,9 @@ export function Session({
     } else if (msg.type === "reporter_line") {
       playerRef.current?.beginLine();
       const line: ReporterLine = msg.line; setQuestion(stripAudioTags(line.say));
+      if (msg.voiceHint) speakBrowser(line.say, msg.voiceHint, true);
     } else if (msg.type === "audio_end") {
+      if (browserLineRef.current) return; // browser speech will send playback_done onend
       const wait = playerRef.current ? playerRef.current.millisecondsUntilEnd() : 0;
       window.clearTimeout(endTimerRef.current);
       endTimerRef.current = window.setTimeout(() => {
@@ -215,6 +231,7 @@ export function Session({
     }
   }
   function end() {
+    speechRef.current?.cancel();
     try { wsRef.current?.send(JSON.stringify({ type: "stop" })); } catch { /* closed */ }
     const still = stillRef.current;
     cleanupRef.current?.(); setLive(false); onEnd(still, sessionIdRef.current);
