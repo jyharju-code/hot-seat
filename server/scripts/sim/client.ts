@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import type { GeneratedScenario, ServerMessage } from "@hot-seat/shared";
+import { isWrapUpLine, type GeneratedScenario, type ServerMessage } from "@hot-seat/shared";
 import type { OwnerAgent } from "./owner.js";
 import { estimateTtsChars } from "./owner.js";
 import { detectSplit, isRepeat, stripCutOff, wordCount, wordErrorRate } from "./metrics.js";
@@ -9,6 +9,12 @@ import { synthesizeAnswer } from "./voice.js";
 import type { TextToSpeech } from "../../src/providers/text-to-speech.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Browser mode has no binary audio: speech starts when the reporter_line
+ *  arrives, plus the client-reported speechStartMs delay. */
+export function browserFirstAudioAt(arrivalMs: number, speechStartMs?: number | null): number {
+  return arrivalMs + Math.max(0, speechStartMs ?? 0);
+}
 
 export interface TurnMetric {
   turn: number;
@@ -111,6 +117,9 @@ export interface SessionResult {
   errors: number;
   failure: string | null;
   debrief: DebriefOutcome | null;
+  mode?: "hot_seat" | "profile";
+  session_complete?: boolean;
+  wrap_up_spoken?: boolean;
 }
 
 export interface SimSessionOptions {
@@ -144,6 +153,9 @@ interface LiveState {
   transcript: TranscriptLine[];
   userTranscripts: Array<{ text: string; atMs: number }>;
   lastReporterText: string;
+  sessionComplete: boolean;
+  wrapUpSpoken: boolean;
+  speechStartMs: number | null;
 }
 
 const freshState = (): LiveState => ({
@@ -158,6 +170,9 @@ const freshState = (): LiveState => ({
   transcript: [],
   userTranscripts: [],
   lastReporterText: "",
+  sessionComplete: false,
+  wrapUpSpoken: false,
+  speechStartMs: null,
 });
 
 /** One synthetic-owner session against a running server, paced like a browser. */
@@ -191,6 +206,9 @@ export class SimSession {
       errors: 0,
       failure: null,
       debrief: null,
+      mode: this.opts.mode ?? "hot_seat",
+      session_complete: false,
+      wrap_up_spoken: false,
     };
     try {
       const scenario = await this.createScenario();
@@ -214,6 +232,8 @@ export class SimSession {
       this.sendStop();
     } finally {
       this.micStopped = true;
+      result.session_complete = this.state.sessionComplete;
+      result.wrap_up_spoken = this.state.wrapUpSpoken;
       result.errors = this.state.errorCount;
       try {
         this.ws?.close();
@@ -255,9 +275,18 @@ export class SimSession {
       if (msg.type === "session_started") this.state.sessionId = msg.sessionId;
       else if (msg.type === "state") this.state.lastState = msg.state;
       else if (msg.type === "audio_end") this.state.reporterQueue.noteAudioEnd();
+      else if (msg.type === "reporter_line") {
+        if (isWrapUpLine(msg.line.say)) this.state.wrapUpSpoken = true;
+        // Browser mode: no binary audio. Speech starts when this line
+        // arrives (plus the client-reported speechStartMs, 0 in the sim).
+        if (msg.voiceHint && this.state.awaitingFirstAudio && this.state.firstAudioAt === null) {
+          this.state.firstAudioAt = browserFirstAudioAt(performance.now(), this.state.speechStartMs);
+          this.state.awaitingFirstAudio = false;
+        }
+      }
       else if (msg.type === "interrupt") this.state.interrupted = true;
       else if (msg.type === "ended") this.state.ended = true;
-      else if (msg.type === "session_complete") this.state.ended = true;
+      else if (msg.type === "session_complete") { this.state.ended = true; this.state.sessionComplete = true; }
       else if (msg.type === "error") {
         this.state.errorCount += 1;
         this.log(`server error: ${msg.message}`);
@@ -266,6 +295,7 @@ export class SimSession {
         if (msg.role === "user") this.state.userTranscripts.push({ text: msg.text, atMs: performance.now() });
         if (msg.role === "reporter") {
           this.state.lastReporterText = msg.text;
+          if (isWrapUpLine(msg.text)) this.state.wrapUpSpoken = true;
           this.state.reporterQueue.noteText(msg.text);
         }
       }

@@ -147,7 +147,7 @@ async function main(): Promise<void> {
   };
 
   const httpBase = args.url.replace(/^ws/, "http").replace(/\/ws$/, "");
-  const owner = new OwnerAgent(new MetaLlm({ apiKey: modelKey, chatModel: "muse-spark-1.3" }), "muse-spark-1.3");
+  const owner = new OwnerAgent(new MetaLlm({ apiKey: modelKey, chatModel: "muse-spark-1.3", chatTimeoutMs: 60_000, structuredTimeoutMs: 60_000 }), "muse-spark-1.3");
   const tts = new ElevenLabsTextToSpeech({ apiKey: elevenKey, defaultVoiceId: OWNER_VOICES.male });
 
   const results: SessionResult[] = new Array<SessionResult>(profiles.length);

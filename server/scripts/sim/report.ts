@@ -78,6 +78,9 @@ export function buildReport(results: readonly SessionResult[], meta: { preset: s
   }
   for (const session of results) {
     lines.push(`## Session: ${session.profile} (${session.session_id ?? "no session id"})`, "");
+    if (session.mode === "profile") {
+      lines.push(`Profile ending: session_complete ${session.session_complete ? "yes" : "no"}, wrap-up spoken ${session.wrap_up_spoken ? "yes" : "no"}`, "");
+    }
     if (session.failure) lines.push(`Failure: ${session.failure}`, "");
     for (const turn of session.turns) {
       lines.push(

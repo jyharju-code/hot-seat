@@ -20,7 +20,9 @@ import {
 import { estimateTtsChars, parseOwnerSegments } from "../scripts/sim/owner.js";
 import { ReporterLineQueue, linePlaybackMs } from "../scripts/sim/reporter-queue.js";
 import { estimateTotalChars, parseArgs } from "../scripts/sim/main.js";
-import { pollFrontPage, pollNewsClip } from "../scripts/sim/client.js";
+import { pollFrontPage, pollNewsClip, browserFirstAudioAt } from "../scripts/sim/client.js";
+import { buildReport } from "../scripts/sim/report.js";
+import { PROFILE_WRAP_UP_LINE, isWrapUpLine } from "@hot-seat/shared";
 
 describe("sim WER", () => {
   it("is zero for identical text after normalisation", () => {
@@ -211,5 +213,22 @@ describe("sim owner segments and CLI", () => {
     expect(mean([1, 2, 3])).toBe(2);
     expect(worst([1, 9, 3])).toBe(9);
     expect(stripCutOff("We take this seriously (cut off)")).toBe("We take this seriously");
+  });
+});
+
+describe("sim browser latency and profile ending (brief 16b)", () => {
+  it("browser first audio is reporter_line arrival plus speechStartMs", () => {
+    expect(browserFirstAudioAt(1000, null)).toBe(1000);
+    expect(browserFirstAudioAt(1000, 120)).toBe(1120);
+    expect(browserFirstAudioAt(1000, -5)).toBe(1000);
+  });
+  it("report prints session_complete and wrap-up for profile runs only", () => {
+    expect(isWrapUpLine(PROFILE_WRAP_UP_LINE)).toBe(true);
+    expect(isWrapUpLine("Tell me more about the early days.")).toBe(false);
+    const base = { profile: "p", preset: "x", session_id: "s1", turns: [], transcript: [], errors: 0, failure: null, debrief: null };
+    const profileReport = buildReport([{ ...base, mode: "profile" as const, session_complete: true, wrap_up_spoken: false }], { preset: "x", turns: 4, at: "t" });
+    expect(profileReport).toContain("Profile ending: session_complete yes, wrap-up spoken no");
+    const hotReport = buildReport([{ ...base, mode: "hot_seat" as const, session_complete: true, wrap_up_spoken: true }], { preset: "x", turns: 4, at: "t" });
+    expect(hotReport).not.toContain("Profile ending:");
   });
 });
