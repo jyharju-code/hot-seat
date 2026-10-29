@@ -7,6 +7,7 @@ import { ElevenLabsTextToSpeech } from "../src/providers/text-to-speech.js";
 import { MuseSpeechToText } from "../src/providers/speech-to-text.js";
 import { DebriefCoach, generateFrontPage } from "../src/debrief.js";
 import { cafeTestScenario } from "../src/scenarios/cafe.js";
+import { CrisisDirector } from "../src/scenarios/director.js";
 
 const sampleDebrief = {
   scores: { clarity: 70, accountability: 40, composure: 80, message_discipline: 55, empathy: 60 },
@@ -136,6 +137,36 @@ describe("debrief retry", () => {
     } as never);
     await expect(coach.generate(cafeTestScenario, [], "en")).rejects.toThrow(/invalid JSON/);
     expect(calls).toBe(1);
+  });
+});
+
+describe("scenario retry (brief 17b)", () => {
+  it("retries once on timeout, logs the retry, then succeeds", async () => {
+    let calls = 0;
+    const logs: string[] = [];
+    const director = new CrisisDirector({
+      chat: async () => { throw new Error("unused"); },
+      generateStructured: async (input: { parse: (r: unknown) => unknown }) => { calls += 1; if (calls === 1) throw timeoutError(); return input.parse(cafeTestScenario); },
+    } as never, undefined, undefined, 60_000, (l) => logs.push(l));
+    await expect(director.generate("A cafe crisis description", "en")).resolves.toMatchObject({ company: { name: "Kettle & Crumb" } });
+    expect(calls).toBe(2);
+    expect(logs).toContain("[scenario] timeout, retrying");
+  });
+  it("does not retry a non-network error and fails after two timeouts", async () => {
+    let calls = 0;
+    const bad = new CrisisDirector({
+      chat: async () => { throw new Error("unused"); },
+      generateStructured: async () => { calls += 1; throw new Error("invalid JSON"); },
+    } as never);
+    await expect(bad.generate("A cafe crisis description", "en")).rejects.toThrow(/invalid JSON/);
+    expect(calls).toBe(1);
+    let calls2 = 0;
+    const slow = new CrisisDirector({
+      chat: async () => { throw new Error("unused"); },
+      generateStructured: async () => { calls2 += 1; throw timeoutError(); },
+    } as never);
+    await expect(slow.generate("A cafe crisis description", "en")).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(calls2).toBe(2);
   });
 });
 

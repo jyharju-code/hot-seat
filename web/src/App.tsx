@@ -203,7 +203,7 @@ export function App() {
       ) : view.kind === "building" ? (
         <main>
           <h1 className="status-headline">Building.</h1>
-          <p className="lede">Building your scenario. {elapsed} s</p>
+          <p className="lede">{elapsed >= 20 ? "Still writing your scenario..." : `Building your scenario. ${elapsed} s`}</p>
           <p className="muted">This can take up to a minute.</p>
         </main>
       ) : view.kind === "buildError" ? (
@@ -212,7 +212,7 @@ export function App() {
           <p className="error">{view.message}</p>
           <p>
             <button className="primary" type="button" onClick={() => build(view.description)}>Try again</button>{" "}
-            <button className="linklike" type="button" onClick={() => setView({ kind: "setup" })}>Change the story</button>
+            <button className="linklike" type="button" onClick={() => { setDescription(view.description); setView({ kind: "setup" }); }}>Change the story</button>
           </p>
         </main>
       ) : view.kind === "briefing" ? (

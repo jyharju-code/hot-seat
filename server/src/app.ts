@@ -48,6 +48,7 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
         config.scenarioModel,
         config.scenarioReasoning,
         config.scenarioTimeoutMs,
+        (line) => app.log.info(line),
       );
       return director.generate(description, language, options);
     });
