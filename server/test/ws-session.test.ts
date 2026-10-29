@@ -60,6 +60,26 @@ describe("WS session lifecycle (brief 08 items 1 and 8)", () => {
     void persisted;
   });
 
+  it("routes speech_started and speech_failed to the orchestrator", async () => {
+    const ws = new FakeSocket();
+    const orch = { ...fakeOrchestrator(), startedAt: 0, failedReasons: [] as string[] };
+    const withHooks = Object.assign(orch, {
+      speechStarted(speechStartMs?: number): void { orch.startedAt = speechStartMs ?? -1; },
+      speechFailed(reason: "no_start" | "error"): void { orch.failedReasons.push(reason); },
+    });
+    attachSessionSocket(ws as never, {
+      build: async () => ({ orchestrator: withHooks, record: record("sess-s") }),
+      persist: () => undefined,
+    });
+    ws.emitMessage(JSON.stringify({ type: "start", scenarioId: "scen-1" }));
+    await tick(); await tick();
+    ws.emitMessage(JSON.stringify({ type: "speech_started", speechStartMs: 12 }));
+    ws.emitMessage(JSON.stringify({ type: "speech_failed", reason: "no_start" }));
+    await tick();
+    expect(orch.startedAt).toBe(12);
+    expect(orch.failedReasons).toEqual(["no_start"]);
+  });
+
   it("a disconnect during the start awaits never starts an orphan session", async () => {
     const ws = new FakeSocket();
     const orch = fakeOrchestrator();

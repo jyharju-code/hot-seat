@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BrowserSpeech, castVoices, isDeniedVoice, localEnglishVoices, pickVoice, sentenceTimeoutMs, splitSentences, voiceBaseName, voiceQualityRank } from "../src/audio/browser-speech.js";
+import { BrowserSpeech, castVoices, isDeniedVoice, localEnglishVoices, pickVoice, readingTimeMs, sentenceTimeoutMs, splitSentences, voiceBaseName, voiceQualityRank } from "../src/audio/browser-speech.js";
 
 const voices = [
   { name: "Google US English", lang: "en-US", localService: false },
@@ -73,6 +73,11 @@ describe("browser speech voices", () => {
     expect(splitSentences("[sharply] One here. Two there? Three")).toEqual(["One here.", "Two there?", "Three"]);
     expect(sentenceTimeoutMs("one two three")).toBeGreaterThan(3000);
   });
+  it("computes silent reading time at 2.6 words/s capped at 6 s", () => {
+    expect(readingTimeMs("one two three")).toBe(1154);
+    expect(readingTimeMs("one")).toBe(385);
+    expect(readingTimeMs(new Array(100).fill("word").join(" "))).toBe(6000);
+  });
   it("speaks, fires onStart/onDone and strips tags", async () => {
     const spoken: string[] = [];
     const fakeSynth = {
@@ -86,5 +91,142 @@ describe("browser speech voices", () => {
     speech.speak("[sharply] Hello world.", { role: "reporter", temperament: "relentless", gender: "male" });
     await vi.waitFor(() => expect(done).toBe(true));
     expect(started).toBe(true); expect(spoken).toEqual(["Hello world."]);
+  });
+});
+
+describe("browser speech start watchdog (brief 18)", () => {
+  interface TestUtterance {
+    text: string;
+    onstart: (() => void) | null;
+    onend: (() => void) | null;
+    onerror: (() => void) | null;
+    voice?: unknown;
+    rate?: number;
+    pitch?: number;
+  }
+  function stalledSynth() {
+    const utterances: TestUtterance[] = [];
+    const synth = {
+      paused: false,
+      speaking: false,
+      pending: false,
+      resumed: 0,
+      cancelled: 0,
+      pauseCalls: 0,
+      getVoices: () => voices,
+      addEventListener: () => undefined,
+      pause: () => { synth.pauseCalls += 1; },
+      resume: () => { synth.resumed += 1; synth.paused = false; },
+      cancel: () => { synth.cancelled += 1; synth.speaking = false; },
+      speak: (u: TestUtterance) => { utterances.push(u); },
+    };
+    return { synth, utterances };
+  }
+  function makeSpeech(synth: ReturnType<typeof stalledSynth>["synth"], cbs: { onStart?: () => void; onDone?: () => void; onFailed?: (r: string) => void } = {}) {
+    let failed: string | null = null;
+    let started = false;
+    let done = false;
+    const speech = new BrowserSpeech({
+      synth: synth as never,
+      createUtterance: (t: string) => ({ text: t, onstart: null, onend: null, onerror: null }) as never,
+      startWatchdogMs: 1500,
+      onFailed: (r) => { failed = r; cbs.onFailed?.(r); },
+    });
+    const state = { get failed() { return failed; }, get started() { return started; }, get done() { return done; } };
+    const cbsOut = {
+      onStart: () => { started = true; cbs.onStart?.(); },
+      onDone: () => { done = true; cbs.onDone?.(); },
+      onFailed: (r: "no_start" | "error") => { failed = r; cbs.onFailed?.(r); },
+    };
+    return { speech, state, cbsOut };
+  }
+
+  it("a synth that never starts is retried once, then reported and finished", async () => {
+    vi.useFakeTimers();
+    try {
+      const { synth, utterances } = stalledSynth();
+      const { speech, state, cbsOut } = makeSpeech(synth);
+      speech.speak("Hello there world.", { role: "reporter" }, cbsOut);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(utterances).toHaveLength(1);
+      expect(synth.cancelled).toBe(0);
+      await vi.advanceTimersByTimeAsync(1500);
+      // Watchdog: cancel the stale queue and speak the sentence once more.
+      expect(synth.cancelled).toBe(1);
+      expect(utterances).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1500);
+      // Still silent: report no_start, wait reading time, then finish.
+      expect(state.failed).toBe("no_start");
+      expect(state.started).toBe(false);
+      expect(state.done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1200);
+      expect(state.done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starting on the retry speaks normally with no failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const { synth, utterances } = stalledSynth();
+      const { speech, state, cbsOut } = makeSpeech(synth);
+      speech.speak("Hello there world.", { role: "reporter" }, cbsOut);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(utterances).toHaveLength(2);
+      utterances[1]!.onstart!();
+      utterances[1]!.onend!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(state.started).toBe(true);
+      expect(state.failed).toBeNull();
+      expect(state.done).toBe(true);
+      expect(synth.cancelled).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes a paused synth and cancels a stale utterance before speaking", async () => {
+    vi.useFakeTimers();
+    try {
+      const { synth, utterances } = stalledSynth();
+      synth.paused = true;
+      synth.speaking = true;
+      const { speech, state, cbsOut } = makeSpeech(synth);
+      speech.speak("Hello there world.", { role: "reporter" }, cbsOut);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(synth.resumed).toBe(1);
+      expect(synth.cancelled).toBe(1);
+      expect(utterances).toHaveLength(1);
+      utterances[0]!.onstart!();
+      utterances[0]!.onend!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(state.started).toBe(true);
+      expect(state.done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("nudges a long utterance with pause/resume while speaking", async () => {
+    vi.useFakeTimers();
+    try {
+      const { synth, utterances } = stalledSynth();
+      const { speech, state, cbsOut } = makeSpeech(synth);
+      const long = new Array(25).fill("word").join(" ") + ".";
+      speech.speak(long, { role: "reporter" }, cbsOut);
+      await vi.advanceTimersByTimeAsync(0);
+      utterances[0]!.onstart!();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(synth.pauseCalls).toBe(1);
+      expect(synth.resumed).toBe(1);
+      // The per-sentence end timeout (over 11 s) has not fired yet.
+      expect(state.done).toBe(false);
+      utterances[0]!.onend!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(state.done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

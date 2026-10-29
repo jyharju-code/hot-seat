@@ -172,6 +172,7 @@ export const clientMessageSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("playback_done") }),
   z.object({ type: z.literal("speech_started"), speechStartMs: z.number().nonnegative().optional() }),
+  z.object({ type: z.literal("speech_failed"), reason: z.enum(["no_start", "error"]) }),
   z.object({ type: z.literal("stop") }),
 ]);
 export type ClientMessage = z.infer<typeof clientMessageSchema>;

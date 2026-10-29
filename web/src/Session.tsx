@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import type { ReporterLine, ServerMessage, SessionState, TurnTiming } from "@hot-seat/shared";
 import { CONNECTION_HICCUP_MESSAGE, serverMessageSchema, stripAudioTags } from "@hot-seat/shared";
 import { PcmPlayer } from "./audio/pcm-player.js";
-import { BrowserSpeech } from "./audio/browser-speech.js";
+import { BrowserSpeech, type SpeechFailureReason } from "./audio/browser-speech.js";
 import { connectionLostUpdate } from "./session-connection.js";
+
+/** Quiet line for a turn whose audio gave up; the question stays on screen. */
+export const VOICE_HICCUP_MESSAGE = "Voice hiccup, the question is on screen.";
 
 interface Entry { role: "user" | "reporter" | "news"; text: string; timing?: TurnTiming }
 const fmtClock = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -52,10 +55,16 @@ export function Session({
   const pendingCompleteRef = useRef(false);
   if (!speechRef.current) speechRef.current = new BrowserSpeech();
   const sendPlaybackDone = () => { const ws = wsRef.current; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "playback_done" })); };
+  const sendSpeechFailed = (reason: SpeechFailureReason) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "speech_failed", reason }));
+    setNotice(VOICE_HICCUP_MESSAGE);
+  };
   const speakBrowser = (text: string, hint: Parameters<BrowserSpeech["speak"]>[1], done: boolean) => {
     browserLineRef.current = true; lineSentAtRef.current = performance.now();
     speechRef.current?.speak(text, hint, {
       onStart: () => { const ws = wsRef.current; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "speech_started", speechStartMs: Math.round(performance.now() - lineSentAtRef.current) })); },
+      onFailed: (reason) => sendSpeechFailed(reason),
       onDone: () => { if (done) { browserLineRef.current = false; if (pendingCompleteRef.current) { pendingCompleteRef.current = false; end(); } else sendPlaybackDone(); } },
     });
   };
@@ -145,7 +154,11 @@ export function Session({
         node.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
           // Capture runs continuously; the server only opens STT after
           // playback_done, so "listening" already means really listening.
-          if (ws.readyState === WebSocket.OPEN && stateRef.current === "listening") ws.send(ev.data);
+          // "thinking" frames are also sent so the server can hear an owner
+          // who resumes mid-answer while the reply is still unsaid (late
+          // continuation); the server drops them outside that window.
+          const s = stateRef.current;
+          if (ws.readyState === WebSocket.OPEN && (s === "listening" || s === "thinking")) ws.send(ev.data);
         };
         ws.onopen = () => { if (!cancelled) { setLive(true); ws.send(JSON.stringify({ type: "start", scenarioId })); } };
         ws.onmessage = (ev: MessageEvent) => {
@@ -196,6 +209,7 @@ export function Session({
         lineSentAtRef.current = performance.now();
         speechRef.current?.speak(msg.message, msg.voiceHint, {
           onStart: () => { const ws = wsRef.current; if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "speech_started", speechStartMs: Math.round(performance.now() - lineSentAtRef.current) })); },
+          onFailed: (reason) => sendSpeechFailed(reason),
           onDone: () => { browserLineRef.current = false; end(); },
         });
       } else {
@@ -204,6 +218,7 @@ export function Session({
       }
     }
     else if (msg.type === "interrupt") {
+      setNotice((n) => (n === VOICE_HICCUP_MESSAGE ? "" : n));
       setState("speaking");
       stateRef.current = "speaking";
       playerRef.current?.beginLine();
@@ -221,6 +236,7 @@ export function Session({
       if (msg.role === "user") setLastAnswer(display);
       setEntries((e) => [...e, { role: msg.role, text: display }]);
     } else if (msg.type === "reporter_line") {
+      setNotice((n) => (n === VOICE_HICCUP_MESSAGE ? "" : n));
       playerRef.current?.beginLine();
       const line: ReporterLine = msg.line; lastReporterTextRef.current = stripAudioTags(line.say); setQuestion(stripAudioTags(line.say));
       if (msg.voiceHint) speakBrowser(line.say, msg.voiceHint, true);

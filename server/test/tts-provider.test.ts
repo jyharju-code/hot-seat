@@ -36,6 +36,9 @@ describe("schemas with voice hints", () => {
     expect(serverMessageSchema.parse({ type: "news_flash", text: "Flash", atSeconds: 1, voiceHint: { role: "radio" } }).type).toBe("news_flash");
     expect(clientMessageSchema.parse({ type: "speech_started", speechStartMs: 42 })).toEqual({ type: "speech_started", speechStartMs: 42 });
     expect(clientMessageSchema.parse({ type: "playback_done" })).toEqual({ type: "playback_done" });
+    expect(clientMessageSchema.parse({ type: "speech_failed", reason: "no_start" })).toEqual({ type: "speech_failed", reason: "no_start" });
+    expect(clientMessageSchema.parse({ type: "speech_failed", reason: "error" })).toEqual({ type: "speech_failed", reason: "error" });
+    expect(clientMessageSchema.safeParse({ type: "speech_failed", reason: "timeout" }).success).toBe(false);
   });
   it("tag stripping and speech estimate", () => {
     expect(stripAudioTags("[sharply] Hello there.")).toBe("Hello there.");

@@ -181,25 +181,87 @@ export function sentenceTimeoutMs(sentence: string, rate = 1): number {
   return Math.max(3000, Math.round((words / 2.6) * 1000 / Math.max(0.5, rate)) + 2500);
 }
 
+export type SpeechFailureReason = "no_start" | "error";
+
+export interface SpeakCallbacks {
+  onStart?: () => void;
+  onDone?: () => void;
+  /** Audio gave up on this line (no_start: never started; error: utterance error). onDone still follows. */
+  onFailed?: (reason: SpeechFailureReason) => void;
+}
+
 export interface BrowserSpeechDeps {
   synth?: SpeechSynthesis | null;
   createUtterance?: (text: string) => SpeechSynthesisUtterance;
   onStart?: () => void;
   onDone?: () => void;
+  onFailed?: (reason: SpeechFailureReason) => void;
   /** Session casting shared across speakers. Defaults to the shared page-session casting. */
   casting?: VoiceCasting;
+  /** ms without onstart before a sentence is retried once, then given up. Default 1500. */
+  startWatchdogMs?: number;
+  /** Chrome long-session workaround cadence while speaking. Default 10000. */
+  keepAliveMs?: number;
+  /** Silent reading speed for a line whose audio gave up, words per second. Default 2.6. */
+  readingWordsPerSecond?: number;
+  /** Cap on the silent reading wait. Default 6000. */
+  readingMaxMs?: number;
 }
 
-/** Queue of browser speech. Splits long text, guards stuck Chrome onend with per-sentence timeout. */
+/** ms without onstart before a sentence is cancelled and spoken once more. */
+export const SPEECH_START_WATCHDOG_MS = 1500;
+/** While speaking, pause/resume on this cadence (Chrome long-utterance workaround). */
+export const SPEECH_KEEPALIVE_MS = 10_000;
+/** Silent reading speed for a line whose audio gave up, words per second. */
+export const SPEECH_READING_WPS = 2.6;
+/** Cap on the silent reading wait for a line whose audio gave up. */
+export const SPEECH_READING_MAX_MS = 6000;
+
+/** Silent reading wait for text whose audio gave up: ~2.6 words/s, at most 6 s. Exported for tests. */
+export function readingTimeMs(text: string, wps = SPEECH_READING_WPS, maxMs = SPEECH_READING_MAX_MS): number {
+  const words = text.split(/\s+/).filter(Boolean).length;
+  return Math.min(maxMs, Math.round((words / Math.max(0.5, wps)) * 1000));
+}
+
+interface ActiveSentence {
+  watchdog: ReturnType<typeof setTimeout> | null;
+  endTimer: ReturnType<typeof setTimeout> | null;
+  keepAlive: ReturnType<typeof setInterval> | null;
+}
+
+/** Queue of browser speech. Splits long text, guards stuck Chrome onend with per-sentence timeout,
+ *  rescues a stalled Chrome queue with a start watchdog (cancel + one retry, then silent reading
+ *  time so the interview continues), and nudges long utterances with pause/resume. */
 export class BrowserSpeech {
-  private queue: Array<{ text: string; hint?: VoiceHint; onStart?: () => void; onDone?: () => void }> = [];
+  private queue: Array<{ text: string; hint?: VoiceHint; onStart?: () => void; onDone?: () => void; onFailed?: (reason: SpeechFailureReason) => void }> = [];
   private speaking = false;
   private generation = 0;
+  private active: ActiveSentence = { watchdog: null, endTimer: null, keepAlive: null };
   constructor(private readonly deps: BrowserSpeechDeps = {}) {}
   private get synth(): SpeechSynthesis | null { return this.deps.synth !== undefined ? this.deps.synth : (typeof speechSynthesis !== "undefined" ? speechSynthesis : null); }
   get isSpeaking(): boolean { return this.speaking; }
-  speak(text: string, hint?: VoiceHint, cbs?: { onStart?: () => void; onDone?: () => void }): void { this.queue.push({ text, hint, onStart: cbs?.onStart, onDone: cbs?.onDone }); void this.pump(); }
-  cancel(): void { this.generation++; this.queue = []; this.speaking = false; try { this.synth?.cancel(); } catch { /* ignore */ } }
+  speak(text: string, hint?: VoiceHint, cbs?: SpeakCallbacks): void { this.queue.push({ text, hint, onStart: cbs?.onStart, onDone: cbs?.onDone, onFailed: cbs?.onFailed }); void this.pump(); }
+  cancel(): void { this.generation++; this.queue = []; this.speaking = false; this.clearActive(); try { this.synth?.cancel(); } catch { /* ignore */ } }
+  private clearActive(): void {
+    if (this.active.watchdog) clearTimeout(this.active.watchdog);
+    if (this.active.endTimer) clearTimeout(this.active.endTimer);
+    if (this.active.keepAlive) clearInterval(this.active.keepAlive);
+    this.active = { watchdog: null, endTimer: null, keepAlive: null };
+  }
+  /** Pre-speak hygiene for a stalled Chrome queue: resume a paused synth, and
+   *  cancel a stale utterance when nothing of ours should be speaking. */
+  private preSpeak(synth: SpeechSynthesis): void {
+    try {
+      if (synth.paused) synth.resume();
+      if (this.queue.length === 0 && (synth.speaking || synth.pending)) synth.cancel();
+    } catch { /* hygiene is best effort */ }
+  }
+  private notifyFailed(item: { onFailed?: (reason: SpeechFailureReason) => void }, reason: SpeechFailureReason, notified: { value: boolean }): void {
+    if (notified.value) return;
+    notified.value = true;
+    try { item.onFailed?.(reason); } catch { /* ignore */ }
+    try { this.deps.onFailed?.(reason); } catch { /* ignore */ }
+  }
   private async pump(): Promise<void> {
     if (this.speaking) return;
     const item = this.queue.shift(); if (!item) return;
@@ -212,21 +274,137 @@ export class BrowserSpeech {
     const picked = (this.deps.casting ?? sharedVoiceCasting).resolve(voices as unknown as BrowserVoiceLike[], item.hint);
     const prosody = tagProsody(item.text);
     const sentences = splitSentences(item.text);
+    const list = sentences.length ? sentences : [""];
     let started = false;
-    for (const sentence of sentences.length ? sentences : [""]) {
+    const failedNotified = { value: false };
+    const fireStart = () => { if (!started) { started = true; try { item.onStart?.(); } catch { /* ignore */ } try { this.deps.onStart?.(); } catch { /* ignore */ } } };
+    const finishItem = () => {
+      this.clearActive();
+      this.speaking = false;
+      if (gen === this.generation) { try { item.onDone?.(); } catch { /* ignore */ } try { this.deps.onDone?.(); } catch { /* ignore */ } void this.pump(); }
+    };
+    for (let i = 0; i < list.length; i++) {
       if (gen !== this.generation) return;
-      await new Promise<void>((resolve) => {
+      const sentence = list[i]!;
+      const result = await this.speakSentence(synth, sentence, picked, prosody, fireStart, gen, i === 0);
+      if (result === "error") {
+        this.notifyFailed(item, "error", failedNotified);
+        // Give up on audio for this line: keep the visible text, wait a
+        // short reading time over what is left, then finish so the
+        // interview continues.
+        await this.waitReading(list.slice(i + 1).join(" ") || sentence);
+        if (gen !== this.generation) return;
+        finishItem();
+        return;
+      }
+      if (result === "no_start") {
+        this.notifyFailed(item, "no_start", failedNotified);
+        await this.waitReading(list.slice(i).join(" ") || sentence);
+        if (gen !== this.generation) return;
+        finishItem();
+        return;
+      }
+    }
+    finishItem();
+  }
+  private waitReading(text: string): Promise<void> {
+    const ms = readingTimeMs(text, this.deps.readingWordsPerSecond ?? SPEECH_READING_WPS, this.deps.readingMaxMs ?? SPEECH_READING_MAX_MS);
+    if (ms <= 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const t = setTimeout(() => { if (this.active.endTimer === t) this.active.endTimer = null; resolve(); }, ms);
+      this.active.endTimer = t;
+    });
+  }
+  /**
+   * Speak one sentence with a start watchdog: no onstart within the watchdog
+   * cancels and retries once; a second miss (or an error before start) gives
+   * up. Returns "ok", "no_start" or "error".
+   */
+  private speakSentence(
+    synth: SpeechSynthesis,
+    sentence: string,
+    picked: { voice: unknown; rate: number; pitch: number },
+    prosody: { rate: number; pitch: number },
+    fireStart: () => void,
+    gen: number,
+    firstOfLine: boolean,
+  ): Promise<"ok" | "no_start" | "error"> {
+    const watchdogMs = this.deps.startWatchdogMs ?? SPEECH_START_WATCHDOG_MS;
+    const keepAliveMs = this.deps.keepAliveMs ?? SPEECH_KEEPALIVE_MS;
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (v: "ok" | "no_start" | "error") => {
+        if (settled || gen !== this.generation) return;
+        settled = true;
+        this.clearActive();
+        resolve(v);
+      };
+      const attempt = (retry: boolean): void => {
+        if (gen !== this.generation) return;
+        if (firstOfLine && !retry) this.preSpeak(synth);
+        else {
+          try { if (synth.paused) synth.resume(); } catch { /* best effort */ }
+        }
         const u = this.deps.createUtterance ? this.deps.createUtterance(sentence) : new SpeechSynthesisUtterance(sentence);
         if (picked.voice) u.voice = picked.voice as unknown as SpeechSynthesisVoice;
         u.rate = Math.min(2, Math.max(0.5, picked.rate * prosody.rate)); u.pitch = Math.min(2, Math.max(0, picked.pitch * prosody.pitch));
-        let done = false; const finish = () => { if (!done) { done = true; clearTimeout(timer); resolve(); } };
-        const timer = setTimeout(finish, sentenceTimeoutMs(sentence, u.rate));
-        u.onstart = () => { if (!started) { started = true; item.onStart?.(); this.deps.onStart?.(); } };
-        u.onend = finish; u.onerror = finish;
-        try { synth.speak(u); } catch { finish(); }
-      });
-    }
-    this.speaking = false;
-    if (gen === this.generation) { item.onDone?.(); this.deps.onDone?.(); void this.pump(); }
+        let startedUtterance = false;
+        // A retried attempt supersedes this one: its late events are ignored.
+        let dead = false;
+        const armEnd = () => {
+          if (this.active.endTimer) clearTimeout(this.active.endTimer);
+          const timer = setTimeout(() => settle("ok"), sentenceTimeoutMs(sentence, u.rate));
+          this.active.endTimer = timer;
+        };
+        const armKeepAlive = () => {
+          if (this.active.keepAlive) clearInterval(this.active.keepAlive);
+          // The usual Chrome workaround for long utterances stalling.
+          this.active.keepAlive = setInterval(() => {
+            try { synth.pause(); synth.resume(); } catch { /* best effort */ }
+          }, keepAliveMs);
+        };
+        if (this.active.watchdog) clearTimeout(this.active.watchdog);
+        this.active.watchdog = setTimeout(() => {
+          this.active.watchdog = null;
+          if (startedUtterance) return;
+          dead = true;
+          try { synth.cancel(); } catch { /* best effort */ }
+          if (!retry) attempt(true);
+          else settle("no_start");
+        }, watchdogMs);
+        u.onstart = () => {
+          if (dead) return;
+          startedUtterance = true;
+          if (this.active.watchdog) { clearTimeout(this.active.watchdog); this.active.watchdog = null; }
+          fireStart();
+          armKeepAlive();
+          armEnd();
+        };
+        u.onend = () => { if (!dead) settle("ok"); };
+        u.onerror = () => {
+          if (dead) return;
+          // An error before start gets the same one retry as a silent stall.
+          if (!startedUtterance && !retry) {
+            if (this.active.watchdog) { clearTimeout(this.active.watchdog); this.active.watchdog = null; }
+            dead = true;
+            try { synth.cancel(); } catch { /* best effort */ }
+            attempt(true);
+            return;
+          }
+          settle(startedUtterance ? "error" : "no_start");
+        };
+        try {
+          synth.speak(u);
+        } catch {
+          if (!retry) {
+            try { synth.cancel(); } catch { /* best effort */ }
+            attempt(true);
+            return;
+          }
+          settle("no_start");
+        }
+      };
+      attempt(false);
+    });
   }
 }
