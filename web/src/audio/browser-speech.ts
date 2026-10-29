@@ -3,31 +3,176 @@ import { stripAudioTags, tagProsody, type VoiceHint } from "@hot-seat/shared";
 export interface BrowserVoiceLike { name: string; lang: string; localService: boolean; default?: boolean }
 export interface VoiceConfigEntry { names?: string[]; langPrefix?: string; rate: number; pitch: number; gender?: "female" | "male" }
 
-/** Voice choice as config, not code paths. Only on-device English voices are eligible. */
+/** Base name before the first " (" or " [": browsers suffix quality and language differently. */
+export function voiceBaseName(name: string): string {
+  return name.split(/\s*[([]/)[0]!.trim();
+}
+
+/** Premium ranks above Enhanced, which ranks above a plain voice of the same base name. */
+export function voiceQualityRank(name: string): number {
+  if (/premium/i.test(name)) return 2;
+  if (/enhanced/i.test(name)) return 1;
+  return 0;
+}
+
+/** Novelty and Eloquence voices are never cast, not even as a last fallback. */
+export const DENIED_VOICE_BASE_NAMES: readonly string[] = [
+  // Eloquence
+  "Eddy", "Flo", "Reed", "Rocko", "Sandy", "Shelley", "Grandma", "Grandpa",
+  // Novelty
+  "Albert", "Bad News", "Bahh", "Bells", "Boing", "Bubbles", "Cellos", "Good News", "Jester", "Junior", "Kathy", "Organ", "Superstar", "Trinoids", "Whisper", "Wobble", "Zarvox",
+];
+const DENIED_SET = new Set(DENIED_VOICE_BASE_NAMES.map((n) => n.toLowerCase()));
+export function isDeniedVoice(voice: BrowserVoiceLike): boolean {
+  return DENIED_SET.has(voiceBaseName(voice.name).toLowerCase());
+}
+
+/** Voice choice as config, not code paths. Names are base names: quality suffixes are ranked, not matched literally. */
 export const VOICE_CONFIG: Record<string, VoiceConfigEntry> = {
-  "reporter:relentless:male": { names: ["Daniel (Enhanced)", "Daniel (Premium)", "Daniel", "Alex (Enhanced)", "Alex"], rate: 1.05, pitch: 0.95, gender: "male" },
-  "reporter:relentless:female": { names: ["Samantha (Enhanced)", "Samantha (Premium)", "Samantha", "Karen (Enhanced)", "Karen"], rate: 1.05, pitch: 1, gender: "female" },
-  "reporter:precise:male": { names: ["Daniel (Enhanced)", "Daniel", "Alex"], rate: 0.98, pitch: 1, gender: "male" },
-  "reporter:precise:female": { names: ["Samantha (Enhanced)", "Samantha", "Moira (Enhanced)", "Moira"], rate: 0.98, pitch: 1.05, gender: "female" },
-  "reporter:human:male": { names: ["Alex (Enhanced)", "Alex", "Daniel"], rate: 0.95, pitch: 0.95, gender: "male" },
-  "reporter:human:female": { names: ["Samantha (Enhanced)", "Samantha", "Karen"], rate: 0.95, pitch: 1, gender: "female" },
-  radio: { names: ["Daniel (Enhanced)", "Daniel (Premium)", "Daniel"], langPrefix: "en-GB", rate: 0.95, pitch: 0.95 },
-  anchor: { names: ["Daniel (Enhanced)", "Daniel (Premium)", "Daniel"], langPrefix: "en-GB", rate: 0.95, pitch: 0.95 },
+  "reporter:relentless:male": { names: ["Evan", "Arthur", "Daniel"], rate: 1.05, pitch: 0.95, gender: "male" },
+  "reporter:relentless:female": { names: ["Ava", "Allison", "Samantha"], rate: 1.05, pitch: 1, gender: "female" },
+  "reporter:precise:male": { names: ["Oliver", "Arthur", "Daniel"], rate: 0.98, pitch: 1, gender: "male" },
+  "reporter:precise:female": { names: ["Serena", "Kate", "Karen"], rate: 0.98, pitch: 1.05, gender: "female" },
+  "reporter:human:male": { names: ["Aaron", "Jamie", "Daniel"], rate: 0.95, pitch: 0.95, gender: "male" },
+  "reporter:human:female": { names: ["Martha", "Stephanie", "Moira"], rate: 0.95, pitch: 1, gender: "female" },
+  radio: { names: ["Jamie", "Arthur", "Daniel"], langPrefix: "en-GB", rate: 0.95, pitch: 0.95 },
+  anchor: { names: ["Daniel", "Oliver"], langPrefix: "en-GB", rate: 0.95, pitch: 0.95 },
 };
+
+export function voiceConfigKey(hint?: VoiceHint): string {
+  return hint?.role === "reporter" ? `reporter:${hint.temperament ?? "relentless"}:${hint.gender ?? "male"}` : (hint?.role ?? "reporter");
+}
 
 export function localEnglishVoices<T extends BrowserVoiceLike>(voices: readonly T[]): T[] {
   return voices.filter((v) => v.localService === true && /^en([-_]|$)/i.test(v.lang));
 }
-export function pickVoice<T extends BrowserVoiceLike>(voices: readonly T[], hint?: VoiceHint): { voice: T | null; rate: number; pitch: number } {
-  const key = hint?.role === "reporter" ? `reporter:${hint.temperament ?? "relentless"}:${hint.gender ?? "male"}` : (hint?.role ?? "reporter");
-  const cfg = VOICE_CONFIG[key] ?? VOICE_CONFIG["reporter:relentless:male"]!;
-  const local = localEnglishVoices(voices);
-  for (const name of cfg.names ?? []) { const v = local.find((x) => x.name === name); if (v) return { voice: v, rate: cfg.rate, pitch: cfg.pitch }; }
-  const enhanced = local.find((v) => /\(Enhanced\)|\(Premium\)/i.test(v.name) && (!cfg.langPrefix || v.lang.toLowerCase().startsWith(cfg.langPrefix.toLowerCase())));
-  if (enhanced) return { voice: enhanced, rate: cfg.rate, pitch: cfg.pitch };
-  if (cfg.langPrefix) { const v = local.find((x) => x.lang.toLowerCase().startsWith(cfg.langPrefix!.toLowerCase())); if (v) return { voice: v, rate: cfg.rate, pitch: cfg.pitch }; }
-  return { voice: local[0] ?? null, rate: cfg.rate, pitch: cfg.pitch };
+
+/** On-device English voices minus the deny list. */
+export function allowedEnglishVoices<T extends BrowserVoiceLike>(voices: readonly T[]): T[] {
+  return localEnglishVoices(voices).filter((v) => !isDeniedVoice(v));
 }
+
+function defaultEnglishVoice<T extends BrowserVoiceLike>(voices: readonly T[]): T | null {
+  const english = voices.filter((v) => /^en([-_]|$)/i.test(v.lang) && !isDeniedVoice(v));
+  return english.find((v) => v.default && v.localService) ?? english.find((v) => v.default) ?? null;
+}
+
+export interface PickVoiceOptions { excludeVoiceNames?: ReadonlySet<string> }
+
+export function pickVoice<T extends BrowserVoiceLike>(voices: readonly T[], hint?: VoiceHint, opts?: PickVoiceOptions): { voice: T | null; rate: number; pitch: number } {
+  const cfg = VOICE_CONFIG[voiceConfigKey(hint)] ?? VOICE_CONFIG["reporter:relentless:male"]!;
+  const allowed = allowedEnglishVoices(voices);
+  const excluded = opts?.excludeVoiceNames;
+  const byBase = (base: string, skipExcluded: boolean): T | null => {
+    const candidates = allowed
+      .filter((v) => voiceBaseName(v.name).toLowerCase() === base.toLowerCase())
+      .filter((v) => !skipExcluded || !excluded?.has(v.name))
+      .sort((a, b) => {
+        const langRank = (v: T) => (cfg.langPrefix && v.lang.toLowerCase().startsWith(cfg.langPrefix.toLowerCase()) ? 1 : 0);
+        return langRank(b) - langRank(a) || voiceQualityRank(b.name) - voiceQualityRank(a.name);
+      });
+    return candidates[0] ?? null;
+  };
+  const anyAllowed = (skipExcluded: boolean): T | null => {
+    const candidates = allowed
+      .filter((v) => !skipExcluded || !excluded?.has(v.name))
+      .sort((a, b) => voiceQualityRank(b.name) - voiceQualityRank(a.name));
+    return candidates[0] ?? null;
+  };
+  // First pass respects session exclusions, second pass reuses a voice rather than staying silent.
+  for (const skipExcluded of excluded && excluded.size > 0 ? [true, false] : [false]) {
+    for (const base of cfg.names ?? []) {
+      const v = byBase(base, skipExcluded);
+      if (v) return { voice: v, rate: cfg.rate, pitch: cfg.pitch };
+    }
+    if (skipExcluded) {
+      const alt = anyAllowed(true);
+      if (alt) return { voice: alt, rate: cfg.rate, pitch: cfg.pitch };
+    }
+    const fallback = defaultEnglishVoice(voices);
+    if (fallback && (!skipExcluded || !excluded?.has(fallback.name))) return { voice: fallback, rate: cfg.rate, pitch: cfg.pitch };
+    if (skipExcluded) continue;
+    // No cast voice and no flagged default: null lets the browser use its own default English voice.
+    return { voice: null, rate: cfg.rate, pitch: cfg.pitch };
+  }
+  return { voice: null, rate: cfg.rate, pitch: cfg.pitch };
+}
+
+export interface VoiceCast { reporter: ReturnType<typeof pickVoice>; radio: ReturnType<typeof pickVoice>; anchor: ReturnType<typeof pickVoice> }
+
+/** Resolve reporter, radio and anchor for one session, distinct whenever an alternative exists. */
+export function castVoices<T extends BrowserVoiceLike>(voices: readonly T[], reporterHint?: VoiceHint): { reporter: { voice: T | null; rate: number; pitch: number }; radio: { voice: T | null; rate: number; pitch: number }; anchor: { voice: T | null; rate: number; pitch: number } } {
+  const used = new Set<string>();
+  const take = (hint: VoiceHint) => {
+    const picked = pickVoice(voices, hint, { excludeVoiceNames: used });
+    if (picked.voice) used.add(picked.voice.name);
+    return picked;
+  };
+  const reporter = take(reporterHint?.role === "reporter" ? reporterHint : { role: "reporter", temperament: "relentless", gender: "male" });
+  const radio = take({ role: "radio" });
+  const anchor = take({ role: "anchor" });
+  return { reporter, radio, anchor };
+}
+
+/** Per-session casting shared by the live session and the evening news player on the same page. */
+export class VoiceCasting {
+  private readonly byKey = new Map<string, string | null>();
+  resolve<T extends BrowserVoiceLike>(voices: readonly T[], hint?: VoiceHint): { voice: T | null; rate: number; pitch: number } {
+    const key = voiceConfigKey(hint);
+    const cfg = VOICE_CONFIG[key] ?? VOICE_CONFIG["reporter:relentless:male"]!;
+    const cached = this.byKey.get(key);
+    if (cached !== undefined) {
+      const voice = cached ? (allowedEnglishVoices(voices).find((v) => v.name === cached) ?? null) : null;
+      return { voice, rate: cfg.rate, pitch: cfg.pitch };
+    }
+    const role = hint?.role ?? "reporter";
+    const excluded = new Set([...this.byKey.entries()].filter(([k]) => !k.startsWith(`${role}:`) && k !== role).map(([, name]) => name).filter((n): n is string => Boolean(n)));
+    const picked = pickVoice(voices, hint, { excludeVoiceNames: excluded });
+    this.byKey.set(key, picked.voice?.name ?? null);
+    return picked;
+  }
+  reset(): void { this.byKey.clear(); }
+}
+
+/** Shared session casting: one page session keeps reporter, radio and anchor apart. */
+export const sharedVoiceCasting = new VoiceCasting();
+
+/** Human-readable casting summary for the dev helper. */
+export function voiceCastSummary(voices: readonly BrowserVoiceLike[], reporterHint?: VoiceHint): Array<{ role: string; voice: string }> {
+  const rows: Array<{ role: string; voice: string }> = [];
+  const hints: Array<[string, VoiceHint]> = [
+    ["reporter:relentless:male", { role: "reporter", temperament: "relentless", gender: "male" }],
+    ["reporter:relentless:female", { role: "reporter", temperament: "relentless", gender: "female" }],
+    ["reporter:precise:male", { role: "reporter", temperament: "precise", gender: "male" }],
+    ["reporter:precise:female", { role: "reporter", temperament: "precise", gender: "female" }],
+    ["reporter:human:male", { role: "reporter", temperament: "human", gender: "male" }],
+    ["reporter:human:female", { role: "reporter", temperament: "human", gender: "female" }],
+    ["radio", { role: "radio" }],
+    ["anchor", { role: "anchor" }],
+  ];
+  for (const [role, hint] of hints) rows.push({ role, voice: pickVoice(voices, hint).voice?.name ?? "(browser default)" });
+  const cast = castVoices(voices, reporterHint);
+  rows.push(
+    { role: "session reporter", voice: cast.reporter.voice?.name ?? "(browser default)" },
+    { role: "session radio", voice: cast.radio.voice?.name ?? "(browser default)" },
+    { role: "session anchor", voice: cast.anchor.voice?.name ?? "(browser default)" },
+  );
+  return rows;
+}
+
+/** Dev-only helper: open the app with ?voices or call window.__hotSeatVoices() in the console. No user UI. */
+export function installVoiceDevHelper(): void {
+  const g = globalThis as unknown as { window?: unknown; location?: { search?: string }; speechSynthesis?: SpeechSynthesis; __hotSeatVoices?: () => void };
+  if (typeof g.window === "undefined" || !g.speechSynthesis) return;
+  const log = () => { try { console.table(voiceCastSummary(g.speechSynthesis!.getVoices() as unknown as BrowserVoiceLike[])); } catch { /* helper only */ } };
+  g.__hotSeatVoices = log;
+  (g.window as { __hotSeatVoices?: () => void }).__hotSeatVoices = log;
+  if (g.location?.search && new URLSearchParams(g.location.search).has("voices")) {
+    if (g.speechSynthesis.getVoices().length) log();
+    g.speechSynthesis.addEventListener?.("voiceschanged", log);
+  }
+}
+installVoiceDevHelper();
 export function splitSentences(text: string): string[] {
   return stripAudioTags(text).match(/[^.!?]+[.!?]+|\S[^.!?]*$/g)?.map((s) => s.trim()).filter(Boolean) ?? [];
 }
@@ -41,6 +186,8 @@ export interface BrowserSpeechDeps {
   createUtterance?: (text: string) => SpeechSynthesisUtterance;
   onStart?: () => void;
   onDone?: () => void;
+  /** Session casting shared across speakers. Defaults to the shared page-session casting. */
+  casting?: VoiceCasting;
 }
 
 /** Queue of browser speech. Splits long text, guards stuck Chrome onend with per-sentence timeout. */
@@ -62,7 +209,7 @@ export class BrowserSpeech {
     // voices may load late
     let voices = synth.getVoices();
     if (!voices.length) { await new Promise<void>((r) => { const t = setTimeout(r, 300); const h = () => { clearTimeout(t); r(); }; synth.addEventListener?.("voiceschanged", h, { once: true } as AddEventListenerOptions); }); voices = synth.getVoices(); }
-    const picked = pickVoice(voices as unknown as BrowserVoiceLike[], item.hint);
+    const picked = (this.deps.casting ?? sharedVoiceCasting).resolve(voices as unknown as BrowserVoiceLike[], item.hint);
     const prosody = tagProsody(item.text);
     const sentences = splitSentences(item.text);
     let started = false;
