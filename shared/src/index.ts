@@ -24,6 +24,11 @@ export interface HealthResponse {
   /** Active TTS path, e.g. browser label. Optional for old servers. */
   tts?: string;
   ttsProvider?: "browser" | "elevenlabs";
+  /**
+   * Deep check (`GET /api/health?deep=1`): free Meta Model API reachability
+   * probe. Never carries the key or the response body.
+   */
+  meta?: { status: string; model_count: number; ms: number };
 }
 
 /** A fictional crisis scenario built before a rehearsal starts. */

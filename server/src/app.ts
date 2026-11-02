@@ -1,3 +1,6 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import type {
   CreateScenarioResponse,
@@ -20,6 +23,8 @@ import { STUDIO_IMAGE_PROMPT } from "./news/clip.js";
 import type { NewsTimelinePart } from "@hot-seat/shared";
 import { ElevenLabsTextToSpeech, type TextToSpeech } from "./providers/text-to-speech.js";
 import { ownerAudioRegistry } from "./session/owner-audio.js";
+import { ACCESS_CODE_HEADER, httpCodeFromRequest, isAccessAllowed } from "./access.js";
+import { capsRefusalMessage, SessionCaps } from "./caps.js";
 
 export const SERVER_VERSION = "0.1.0";
 export const MAX_STILL_BYTES = 2 * 1024 * 1024;
@@ -33,11 +38,85 @@ export interface AppDeps {
   /** Anchor TTS for the news clip. Null disables clip building. */
   tts?: TextToSpeech | null;
   newsVoiceId?: string;
+  /** Session-generation caps. Defaults to the config values. */
+  caps?: SessionCaps;
+  /**
+   * Directory of the built web app to serve in production. When set, static
+   * serving is enabled regardless of NODE_ENV (used by tests). Otherwise it
+   * is enabled only when NODE_ENV=production, resolved from web/dist.
+   */
+  staticDir?: string;
+  /** Fetch for the Meta /v1/models deep check. Defaults to global fetch. */
+  metaModelsFetch?: typeof fetch;
+}
+
+const META_MODELS_URL = "https://api.meta.ai/v1/models";
+const DEEP_CACHE_MS = 30_000;
+
+const STATIC_MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".map": "application/json; charset=utf-8",
+};
+
+/** Locate web/dist from the source tree or the working directory. */
+export function resolveWebDistDir(): string | null {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, "../../web/dist"),
+    path.resolve(here, "../web/dist"),
+    path.resolve(process.cwd(), "web/dist"),
+  ];
+  for (const dir of candidates) {
+    try {
+      if (existsSync(path.join(dir, "index.html"))) return dir;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/** /api/* paths need the access code, except the open health check. */
+export function apiPathNeedsCode(url: string): boolean {
+  const pathname = url.split("?")[0] ?? url;
+  if (pathname === "/api/health" || !pathname.startsWith("/api/")) return false;
+  return true;
 }
 
 export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
   const app = Fastify({ logger: config.NODE_ENV !== "test" });
   const store = deps.store ?? new ScenarioStore(config.dataDir);
+  const caps =
+    deps.caps ??
+    new SessionCaps({
+      maxSessionsPerDay: config.MAX_SESSIONS_PER_DAY,
+      maxSessionsPerIpPerHour: config.MAX_SESSIONS_PER_IP_PER_HOUR,
+    });
+
+  // Access-code gate: every /api/* route except /api/health. Unset code
+  // means no gate (local dev, sims). The code itself is never logged.
+  app.addHook("onRequest", async (request, reply) => {
+    if (!config.ACCESS_CODE) return;
+    const url = request.raw.url ?? request.url;
+    if (!apiPathNeedsCode(url)) return;
+    const provided = httpCodeFromRequest(request.headers[ACCESS_CODE_HEADER], request.raw.url ?? request.url);
+    if (!isAccessAllowed(provided, config.ACCESS_CODE)) {
+      return reply.code(401).send({ error: "Invalid or missing access code." });
+    }
+  });
 
   const generate: ScenarioGenerator =
     deps.generateScenario ??
@@ -53,13 +132,54 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       return director.generate(description, language, options);
     });
 
-  app.get("/api/health", async (): Promise<HealthResponse> => ({
-    status: "ok",
-    service: "hot-seat-server",
-    version: SERVER_VERSION,
-    tts: config.ttsProvider === "browser" ? BROWSER_TTS_LABEL : "Text to speech: ElevenLabs eleven_v4",
-    ttsProvider: config.ttsProvider,
-  }));
+  // Deep check (?deep=1): one free Meta Model API call (GET /v1/models),
+  // cached for 30 s. Returns reachability only, never the key or the body.
+  let deepCache: { at: number; result: NonNullable<HealthResponse["meta"]> } | null = null;
+  app.get("/api/health", async (request): Promise<HealthResponse> => {
+    const base: HealthResponse = {
+      status: "ok",
+      service: "hot-seat-server",
+      version: SERVER_VERSION,
+      tts: config.ttsProvider === "browser" ? BROWSER_TTS_LABEL : "Text to speech: ElevenLabs eleven_v4",
+      ttsProvider: config.ttsProvider,
+    };
+    const query = (request.query ?? {}) as { deep?: unknown };
+    if (query.deep !== "1" && query.deep !== 1) return base;
+    const now = Date.now();
+    if (deepCache && now - deepCache.at < DEEP_CACHE_MS) {
+      return { ...base, meta: deepCache.result };
+    }
+    const started = performance.now();
+    let result: NonNullable<HealthResponse["meta"]>;
+    if (!config.MODEL_API_KEY) {
+      result = { status: "unconfigured", model_count: 0, ms: 0 };
+    } else {
+      try {
+        const fetchFn = deps.metaModelsFetch ?? fetch;
+        const res = await fetchFn(META_MODELS_URL, {
+          headers: { authorization: `Bearer ${config.MODEL_API_KEY}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        const ms = Math.round(performance.now() - started);
+        if (!res.ok) {
+          result = { status: `http_${res.status}`, model_count: 0, ms };
+        } else {
+          let model_count = 0;
+          try {
+            const body = (await res.json()) as { data?: unknown };
+            model_count = Array.isArray(body.data) ? body.data.length : 0;
+          } catch {
+            model_count = 0;
+          }
+          result = { status: "ok", model_count, ms };
+        }
+      } catch {
+        result = { status: "error", model_count: 0, ms: Math.round(performance.now() - started) };
+      }
+    }
+    deepCache = { at: now, result };
+    return { ...base, meta: result };
+  });
 
   app.get("/api/providers", async (): Promise<ProvidersResponse> => ({
     providers: providerStatuses(config),
@@ -68,6 +188,10 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
   app.get("/api/presets", async () => ({ presets, profilePresets }));
 
   app.post<{ Body: unknown }>("/api/scenarios", async (request, reply) => {
+    const refusal = caps.checkAndRecord(request.ip);
+    if (refusal) {
+      return reply.code(429).send({ error: capsRefusalMessage(refusal) });
+    }
     const body = (request.body ?? {}) as { description?: unknown; language?: unknown; mode?: unknown; duration_minutes?: unknown; durationMinutes?: unknown };
     const description = typeof body.description === "string" ? body.description.trim() : "";
     if (description.length < 10 || description.length > 600) {
@@ -476,6 +600,49 @@ export function buildApp(config: Config, deps: AppDeps = {}): FastifyInstance {
       return response;
     },
   );
+
+  // Production: one process serves the built web app, the API and /ws from
+  // one port. Unknown non-API GET paths fall back to index.html (SPA).
+  const staticDir = deps.staticDir ?? (config.NODE_ENV === "production" ? resolveWebDistDir() : null);
+  if (staticDir) {
+    const root = path.resolve(staticDir);
+    app.setNotFoundHandler((request, reply) => {
+      const pathname = (request.raw.url ?? request.url).split("?")[0] ?? "/";
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return reply.code(404).send({ error: "Not found." });
+      }
+      if (pathname.startsWith("/api/") || pathname === "/ws") {
+        return reply.code(404).send({ error: "Not found." });
+      }
+      let decoded = pathname;
+      try {
+        decoded = decodeURIComponent(pathname);
+      } catch {
+        return reply.code(400).send({ error: "Bad path." });
+      }
+      const rel = decoded.replace(/^\/+/, "");
+      const candidate = path.normalize(path.join(root, rel));
+      const inside = candidate === root || candidate.startsWith(root + path.sep);
+      let file: string | null = null;
+      if (inside) {
+        try {
+          if (statSync(candidate).isFile()) file = candidate;
+        } catch {
+          file = null;
+        }
+      }
+      // SPA fallback: unknown client routes serve index.html.
+      file ??= path.join(root, "index.html");
+      let body: Buffer;
+      try {
+        body = readFileSync(file);
+      } catch {
+        return reply.code(404).send({ error: "Not found." });
+      }
+      const ext = path.extname(file).toLowerCase();
+      return reply.type(STATIC_MIME[ext] ?? "application/octet-stream").send(body);
+    });
+  }
 
   return app;
 }

@@ -6,7 +6,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 loadDotenv({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.env") });
 loadDotenv();
 import { buildApp } from "./app.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, resolveListen } from "./config.js";
+import { isWsUpgradeAllowed } from "./access.js";
 import { JournalistBrain, loadJournalistPrompts, primaryJournalist } from "./journalist.js";
 import { LlmInterruptDecider } from "./interrupt.js";
 import { loadPrompt } from "./prompts.js";
@@ -37,7 +38,14 @@ console.log(`[config] ${config.ttsProvider === "browser" ? BROWSER_TTS_LABEL : "
 
 const wss = new WebSocketServer({ noServer: true });
 app.server.on("upgrade", (request, socket, head) => {
-  if (request.url === "/ws") {
+  const pathname = (request.url ?? "/").split("?")[0];
+  if (pathname === "/ws" || pathname === "/ws/") {
+    // Access code travels as ?code= (the browser cannot set headers on a WS
+    // handshake). Refused upgrades just die; the code itself is never logged.
+    if (!isWsUpgradeAllowed(request.url, config.ACCESS_CODE)) {
+      socket.destroy();
+      return;
+    }
     wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
   } else {
     socket.destroy();
@@ -133,5 +141,8 @@ wss.on("connection", (ws: WebSocket) => {
   });
 });
 
-await app.listen({ host: config.SERVER_HOST, port: config.SERVER_PORT });
-app.log.info(`Hot Seat server listening on http://${config.SERVER_HOST}:${config.SERVER_PORT}`);
+// Render sets PORT: it wins over SERVER_PORT and binds 0.0.0.0 so one
+// process serves the web app, the API and /ws from one port.
+const listen = resolveListen(process.env, config);
+await app.listen({ host: listen.host, port: listen.port });
+app.log.info(`Hot Seat server listening on http://${listen.host}:${listen.port}`);

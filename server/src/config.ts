@@ -34,6 +34,12 @@ const envSchema = z.object({
   NEWS_TTS_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(30_000),
   STT_HANDSHAKE_TIMEOUT_MS: z.coerce.number().int().positive().max(600_000).default(20_000),
   DEV_TURN_LOG: z.preprocess(emptyToUndefined, z.enum(["0", "1"]).optional()),
+  /** Public gate code. Unset means no gate (local dev, sims). Never logged. */
+  ACCESS_CODE: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  /** Server-wide scenario generations per day. Unset or 0 means no cap. */
+  MAX_SESSIONS_PER_DAY: z.coerce.number().int().nonnegative().max(10_000).default(60),
+  /** Scenario generations per client IP per hour. Unset or 0 means no cap. */
+  MAX_SESSIONS_PER_IP_PER_HOUR: z.coerce.number().int().nonnegative().max(10_000).default(6),
 });
 
 export const BROWSER_TTS_LABEL = "Text to speech: browser speech synthesis (on-device, not a model call)";
@@ -94,6 +100,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     newsTtsTimeoutMs: parsed.data.NEWS_TTS_TIMEOUT_MS,
     sttHandshakeTimeoutMs: parsed.data.STT_HANDSHAKE_TIMEOUT_MS,
   };
+}
+
+/**
+ * Effective listen address. Render sets PORT: when it holds a valid port it
+ * wins over SERVER_PORT and the host becomes 0.0.0.0. Otherwise the local
+ * SERVER_HOST/SERVER_PORT defaults apply, so local dev is unchanged.
+ */
+export function resolveListen(
+  env: NodeJS.ProcessEnv = process.env,
+  config: Pick<Config, "SERVER_HOST" | "SERVER_PORT">,
+): { host: string; port: number } {
+  const raw = env.PORT;
+  const port = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+  if (Number.isInteger(port) && port > 0 && port <= 65535) {
+    return { host: "0.0.0.0", port };
+  }
+  return { host: config.SERVER_HOST, port: config.SERVER_PORT };
 }
 
 export function providerStatuses(config: Config) {
