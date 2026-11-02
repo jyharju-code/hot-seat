@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DebriefNews, GeneratedScenario, NewsClipResponse, NewsTimelinePart } from "@hot-seat/shared";
 import { BrowserSpeech } from "./audio/browser-speech.js";
+import { apiFetch, withCode } from "./access-code.js";
 
 export function partAtTime(timeline: readonly NewsTimelinePart[], ms: number): NewsTimelinePart | null {
   return timeline.find((p) => ms >= p.startMs && ms < p.endMs) ?? timeline[timeline.length - 1] ?? null;
@@ -61,11 +62,13 @@ export function NewsPlayer({
   news,
   scenario,
   fallbackStillUrl,
+  onUnauthorized,
 }: {
   sessionId: string;
   news: DebriefNews;
   scenario: GeneratedScenario;
   fallbackStillUrl: string | null;
+  onUnauthorized?: () => void;
 }) {
   const [clip, setClip] = useState<NewsClipResponse | null>(null);
   const [building, setBuilding] = useState(true);
@@ -85,10 +88,16 @@ export function NewsPlayer({
   useEffect(() => {
     let cancelled = false;
     const poll = () => {
-      fetch(`/api/sessions/${sessionId}/news-clip`)
+      apiFetch(`/api/sessions/${sessionId}/news-clip`)
         .then(async (res) => {
           if (cancelled) return;
           if (res.status === 202) return;
+          if (res.status === 401) {
+            onUnauthorized?.();
+            setBuilding(false);
+            setFailed(true);
+            return;
+          }
           if (!res.ok) {
             setBuilding(false);
             setFailed(true);
@@ -122,7 +131,7 @@ export function NewsPlayer({
         return;
       }
       const img = new Image();
-      img.src = url;
+      img.src = withCode(url) ?? url;
       ref.current = img;
     };
     load(clip.studioImageUrl, studioImgRef);
@@ -309,7 +318,7 @@ export function NewsPlayer({
       </div>
       <audio
         ref={audioRef}
-        src={clip.ttsMode === "browser" ? (clip.soundbiteAudioUrl ?? clip.audioUrl) : clip.audioUrl}
+        src={withCode(clip.ttsMode === "browser" ? (clip.soundbiteAudioUrl ?? clip.audioUrl) : clip.audioUrl) ?? undefined}
         preload="auto"
         onEnded={() => setPlaying(false)}
         onPause={() => setPlaying(false)}

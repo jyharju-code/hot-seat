@@ -4,6 +4,7 @@ import { CONNECTION_HICCUP_MESSAGE, serverMessageSchema, stripAudioTags } from "
 import { PcmPlayer } from "./audio/pcm-player.js";
 import { BrowserSpeech, type SpeechFailureReason } from "./audio/browser-speech.js";
 import { connectionLostUpdate } from "./session-connection.js";
+import { wsUrl } from "./access-code.js";
 
 /** Quiet line for a turn whose audio gave up; the question stays on screen. */
 export const VOICE_HICCUP_MESSAGE = "Voice hiccup, the question is on screen.";
@@ -146,8 +147,7 @@ export function Session({
         playCtxRef.current = playCtx;
         playerRef.current = new PcmPlayer(playCtx);
         locals.push(() => void playCtx.close().catch(() => undefined));
-        const proto = location.protocol === "https:" ? "wss:" : "ws:";
-        const ws = new WebSocket(`${proto}//${location.host}/ws`);
+        const ws = new WebSocket(wsUrl());
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
         locals.push(() => ws.close());

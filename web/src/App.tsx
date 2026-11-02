@@ -13,6 +13,7 @@ import {
 import { Session, type CameraStill } from "./Session.js";
 import { NewsPlayer } from "./NewsPlayer.js";
 import { buildClientHtmlFrontPage, isHtmlFrontPage, type HtmlFrontPage } from "./front-page.js";
+import { apiFetch, setAccessCode, takeCodeFromUrl } from "./access-code.js";
 
 type LoadState =
   | { kind: "loading" }
@@ -39,11 +40,28 @@ export function App() {
   const [presets, setPresets] = useState<ScenarioPreset[]>([]);
   const [profilePresets, setProfilePresets] = useState<ScenarioPreset[]>([]);
   const [elapsed, setElapsed] = useState(0);
+  // Access-code gate: "unknown" while probing, "open" when the server
+  // answers 401, "passed" otherwise (including local dev with no code set).
+  const [gate, setGate] = useState<"unknown" | "open" | "passed">("unknown");
+  const [gateTries, setGateTries] = useState(0);
+
+  useEffect(() => {
+    takeCodeFromUrl();
+    let cancelled = false;
+    apiFetch("/api/presets")
+      .then((res) => { if (!cancelled) setGate(res.status === 401 ? "open" : "passed"); })
+      .catch(() => { if (!cancelled) setGate("passed"); });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/providers")
+    apiFetch("/api/providers")
       .then(async (res) => {
+        if (res.status === 401) {
+          if (!cancelled) setGate("open");
+          throw new Error("Access code required.");
+        }
         if (!res.ok) throw new Error(`Server replied ${res.status}`);
         return (await res.json()) as ProvidersResponse;
       })
@@ -57,8 +75,12 @@ export function App() {
   useEffect(() => {
     if (view.kind !== "setup") return;
     let cancelled = false;
-    fetch("/api/presets")
+    apiFetch("/api/presets")
       .then(async (res) => {
+        if (res.status === 401) {
+          if (!cancelled) setGate("open");
+          throw new Error("Access code required.");
+        }
         if (!res.ok) throw new Error(`Server replied ${res.status}`);
         return (await res.json()) as { presets: ScenarioPreset[]; profilePresets?: ScenarioPreset[] };
       })
@@ -72,13 +94,17 @@ export function App() {
     setElapsed(0);
     const id = window.setInterval(() => setElapsed(Math.floor((Date.now() - view.startedAt) / 1000)), 250);
     let cancelled = false;
-    fetch("/api/scenarios", {
+    apiFetch("/api/scenarios", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ description: view.description, language: "en", mode: view.mode, duration_minutes: view.durationMinutes }),
     })
       .then(async (res) => {
         const data = (await res.json()) as CreateScenarioResponse & { error?: string };
+        if (res.status === 401) {
+          if (!cancelled) setGate("open");
+          throw new Error(data.error ?? "Access code required.");
+        }
         if (!res.ok) throw new Error(data.error ?? `Server replied ${res.status}`);
         return data;
       })
@@ -104,7 +130,7 @@ export function App() {
     );
     let cancelled = false;
     const still = view.still;
-    fetch(`/api/sessions/${view.sessionId ?? view.built.id}/debrief`, {
+    apiFetch(`/api/sessions/${view.sessionId ?? view.built.id}/debrief`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -114,6 +140,10 @@ export function App() {
     })
       .then(async (res) => {
         const data = (await res.json()) as DebriefResponse & { error?: string };
+        if (res.status === 401) {
+          if (!cancelled) setGate("open");
+          throw new Error(data.error ?? "Access code required.");
+        }
         if (!res.ok) throw new Error(data.error ?? `Server replied ${res.status}`);
         return data;
       })
@@ -199,6 +229,19 @@ export function App() {
             setView({ kind: "session", built: view.built, runId: Date.now() })
           }
           onNewCrisis={() => setView({ kind: "setup" })}
+          onUnauthorized={() => setGate("open")}
+        />
+      ) : gate === "open" ? (
+        <GateView
+          showRetry={gateTries > 0}
+          onEnter={() => {
+            setGateTries((n) => n + 1);
+            // Re-probe with the entered code before letting the judge in.
+            apiFetch("/api/presets").then(
+              (res) => setGate(res.status === 401 ? "open" : "passed"),
+              () => setGate("passed"),
+            );
+          }}
         />
       ) : view.kind === "building" ? (
         <main>
@@ -364,6 +407,7 @@ function DebriefView({
   sessionId,
   onTryAgain,
   onNewCrisis,
+  onUnauthorized,
 }: {
   debrief: Debrief;
   interviewMap?: DebriefResponse["interviewMap"];
@@ -372,6 +416,7 @@ function DebriefView({
   sessionId: string | null;
   onTryAgain: () => void;
   onNewCrisis: () => void;
+  onUnauthorized: () => void;
 }) {
   const landmineFacts = new Map(scenario.landmines.map((m) => [m.id, m.fact]));
   const [frontPage, setFrontPage] = useState<FrontPageResult | null>(initialFrontPage);
@@ -381,10 +426,11 @@ function DebriefView({
     if (frontPage || !sessionId) return;
     let cancelled = false;
     const poll = () => {
-      fetch(`/api/sessions/${sessionId}/front-page`)
+      apiFetch(`/api/sessions/${sessionId}/front-page`)
         .then(async (res) => {
           if (cancelled) return;
           if (res.status === 202) return;
+          if (res.status === 401) { onUnauthorized(); setPrinting(false); return; }
           if (!res.ok) { setPrinting(false); return; }
           const data = (await res.json()) as DebriefResponse;
           if (cancelled) return;
@@ -401,12 +447,13 @@ function DebriefView({
   const retryFrontPage = () => {
     if (!sessionId) return;
     setPrinting(true);
-    fetch(`/api/sessions/${sessionId}/front-page/retry`, {
+    apiFetch(`/api/sessions/${sessionId}/front-page/retry`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({}),
     })
       .then((res) => {
+        if (res.status === 401) { onUnauthorized(); throw new Error("retry failed"); }
         if (!res.ok && res.status !== 202) throw new Error("retry failed");
         setFrontPage(null);
       })
@@ -525,6 +572,7 @@ function DebriefView({
           sessionId={sessionId}
           news={debrief.news}
           scenario={scenario}
+          onUnauthorized={onUnauthorized}
           fallbackStillUrl={
             displayFrontPage?.kind === "image"
               ? `data:${displayFrontPage.mime};base64,${displayFrontPage.imageBase64}`
@@ -545,6 +593,43 @@ function DebriefView({
           New crisis
         </button>
       </p>
+    </main>
+  );
+}
+
+function GateView({ showRetry, onEnter }: { showRetry: boolean; onEnter: () => void }) {
+  const [code, setCode] = useState("");
+  return (
+    <main>
+      <h1 className="status-headline">Welcome.</h1>
+      <p className="lede">This demo is gated. Enter the access code from the submission page.</p>
+      {showRetry && <p className="error">That code did not work. Check it and try again.</p>}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          const trimmed = code.trim();
+          if (!trimmed) return;
+          setAccessCode(trimmed);
+          onEnter();
+        }}
+      >
+        <label className="field-label" htmlFor="access-code">Access code</label>
+        <input
+          id="access-code"
+          className="crisis-input"
+          type="text"
+          autoComplete="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+        />
+        <p>
+          <button className="primary" type="submit" disabled={code.trim().length === 0}>
+            Enter
+          </button>
+        </p>
+      </form>
     </main>
   );
 }
