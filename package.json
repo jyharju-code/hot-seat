@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "concurrently -n server,web -c blue,red \"npm run dev -w @hot-seat/server\" \"npm run dev -w @hot-seat/web\"",
     "build": "npm run build --workspaces --if-present",
+    "build:prod": "npm run typecheck -w @hot-seat/shared --if-present && npm run build -w @hot-seat/web",
+    "start:prod": "NODE_ENV=production npm run start -w @hot-seat/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
     "test": "vitest run",

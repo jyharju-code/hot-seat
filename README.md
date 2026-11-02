@@ -40,6 +40,46 @@ Checks:
 npm run check   # typecheck + lint + test
 ```
 
+## Deploy
+
+The live demo runs as one Render free web service (region Virginia) deployed
+from this repo's `main` branch via the [render.yaml](render.yaml) Blueprint.
+One process serves the built web app (`web/dist`), the API and `/ws` from the
+single `PORT` Render provides. Local dev is unchanged (`127.0.0.1:3001`).
+
+```bash
+npm run build:prod   # builds shared (typecheck) and web
+npm run start:prod   # serves web/dist + API + /ws with NODE_ENV=production
+```
+
+Render dashboard setup: create a Blueprint from `render.yaml`, then type in
+the two secrets it declares (`sync: false`): `MODEL_API_KEY` and
+`ACCESS_CODE`. No ElevenLabs, Soniox or Baseten keys are declared: at runtime
+only Meta models are called. The disk is ephemeral, so `DATA_DIR` keeps its
+`./data` default.
+
+Access code and budget caps (protect the remaining Meta credits):
+
+- When `ACCESS_CODE` is set, every `/api/*` route except `/api/health` and
+  every `/ws` upgrade needs it (`x-access-code` header, or `?code=` for the
+  socket and media URLs). Wrong or missing code answers 401. The web app
+  shows a gate screen first, stores the code in `localStorage`, and also
+  accepts `?code=XXXX` in the page URL once (stored, then stripped from the
+  address bar), so a judge link can carry the code. When `ACCESS_CODE` is
+  unset, nothing is enforced.
+- `MAX_SESSIONS_PER_DAY` (default 60, server-wide) and
+  `MAX_SESSIONS_PER_IP_PER_HOUR` (default 6) count scenario generations. Over
+  a cap the server answers 429 with a friendly message and makes no model
+  call. Unset or `0` means no cap. Counters are in memory.
+- `GET /api/health?deep=1` adds a free Meta Model API reachability probe
+  (`{ meta: { status, model_count, ms } }`, never the key or the body),
+  cached for 30 s. It tells us right after the first deploy whether the Meta
+  API answers from Render's region.
+- Render free sleeps after 15 min idle. The
+  [.github/workflows/keep-awake.yml](.github/workflows/keep-awake.yml)
+  workflow pings `/api/health` every 10 minutes using the `RENDER_URL`
+  repository variable (skips quietly when unset).
+
 ## Architecture
 
 TypeScript everywhere, npm workspaces: `server/`, `web/`, `shared/`.
@@ -78,6 +118,20 @@ Config keys (see `.env.example`): `MODEL_API_KEY`, `ELEVENLABS_API_KEY` (optiona
 | Muse Image | Meta model call (front page and studio images) |
 | Speech synthesis (reporter, radio, anchor) | Browser/OS feature (`speechSynthesis`, on-device voices only, not a model call) |
 | Audio capture and news player | Browser features (microphone, playback, canvas) |
+
+### Which parts are Meta models
+
+| Product part | Meta Model API call | Not a model call |
+|---|---|---|
+| Scenario generation | Muse Wonder (structured) | |
+| Reporter turns | Muse Spark (chat) | |
+| Interrupt decisions | Muse Spark (chat) | |
+| Interview plan | Muse Spark (chat) | |
+| Debrief | Muse Wonder (structured) | |
+| Front page image | Muse Image | |
+| Speech to text | Muse Voice Transcribe | |
+| Reporter's voice | | Browser speech synthesis (on-device) |
+| News anchor's voice | | Browser speech synthesis (on-device) |
 
 The ElevenLabs adapter, its voices and the Soniox configuration stay in the code behind
 `TTS_PROVIDER=elevenlabs` (off by default, requires `ELEVENLABS_API_KEY`). Without that key the

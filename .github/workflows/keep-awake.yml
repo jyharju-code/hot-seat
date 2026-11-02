@@ -1,0 +1,22 @@
+name: Keep awake
+
+# Render's free web service sleeps after 15 minutes idle. Ping the health
+# check every 10 minutes to keep the demo warm for judges. No secrets: the
+# URL comes from the RENDER_URL repository variable, and the check skips
+# quietly when it is unset.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health check
+        run: |
+          if [ -z "${{ vars.RENDER_URL }}" ]; then
+            echo "RENDER_URL is not set, skipping."
+            exit 0
+          fi
+          curl -fsS "${{ vars.RENDER_URL }}/api/health"

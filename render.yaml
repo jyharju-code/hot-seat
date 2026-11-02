@@ -1,0 +1,27 @@
+# Render Blueprint: one free web service in Virginia serves the built web app,
+# the API and /ws from one port. At runtime only Meta models are called, so
+# only Meta secrets are declared here.
+services:
+  - type: web
+    name: hot-seat
+    runtime: node
+    plan: free
+    region: virginia
+    branch: main
+    buildCommand: npm ci --include=dev && npm run build:prod
+    startCommand: npm run start:prod
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 24
+      - key: NODE_ENV
+        value: production
+      - key: TTS_PROVIDER
+        value: browser
+      - key: INTERRUPTS
+        value: on
+      - key: MODEL_API_KEY
+        sync: false
+      - key: ACCESS_CODE
+        sync: false
