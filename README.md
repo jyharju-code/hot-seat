@@ -1,17 +1,18 @@
 # Hot Seat
 
-Hot Seat gives small business owners a rehearsal before their worst day.
-
-Media training used to be reserved for executives with PR teams. In Hot Seat you
+Hot Seat is a live press-interview rehearsal for small business owners. You
 describe your business and a crisis, Muse Wonder builds a fictional scenario, and
-AI reporters question you out loud in real time. They interrupt dodges and quote
-your own words back. Muse Voice Transcribe listens, Muse Spark plays the reporters
-and watches body language through the webcam, and the debrief ends with tomorrow's
-front page made by Muse Image. English first, Finnish second.
+an AI reporter questions you out loud in real time. The reporter interrupts
+dodges and quotes your own words back.
 
-This repository currently contains only the foundation: the monorepo, the provider
-interfaces, the Meta language model adapter, and one start screen. Session logic
-arrives in later briefs.
+Two modes: a hot seat crisis interview, and a friendly profile interview for a
+happy occasion. One reporter per session, in a 5- or 10-minute session. After
+the interview you get a debrief with scores, your best and worst moments (each
+worst moment comes with a better line for next time), an interview map,
+tomorrow's front page with your photo, and an evening news clip. English only.
+
+The webcam takes one still photo mid-session for the front page and the news
+clip. It is not analysed for body language.
 
 ## Run it
 
@@ -101,9 +102,11 @@ of them can be swapped without touching session code.
 | `TextToSpeech` | Browser speech synthesis by default (on-device, not a model call); ElevenLabs `eleven_v4` only when `TTS_PROVIDER=elevenlabs` | |
 | `ImageGen` (edit a photo) | Muse Image `/v1/images/edits` | |
 
-In this scaffold only the Meta `Llm` adapter is implemented. The other adapters are
-interfaces with TODO stubs that throw `NotImplemented`. One integration test calls
-the live Meta API and is skipped unless `MODEL_API_KEY` is set.
+Every port has a working Meta adapter (`MetaLlm`, `MuseSpeechToText`,
+`MetaImageGen`); reporter turns can hedge to Baseten and speech can use
+ElevenLabs instead of the browser. Stub implementations are used when the
+matching key is missing. One integration test calls the live Meta API and is
+skipped unless `MODEL_API_KEY` is set.
 
 Config keys (see `.env.example`): `MODEL_API_KEY`, `ELEVENLABS_API_KEY` (optional),
 `SONIOX_API_KEY`, `BASETEN_API_KEY`, `TTS_PROVIDER` (`browser` default, or `elevenlabs`).
@@ -126,7 +129,7 @@ Config keys (see `.env.example`): `MODEL_API_KEY`, `ELEVENLABS_API_KEY` (optiona
 | Scenario generation | Muse Wonder (structured) | |
 | Reporter turns | Muse Spark (chat) | |
 | Interrupt decisions | Muse Spark (chat) | |
-| Interview plan | Muse Spark (chat) | |
+| Interview plan | Muse Wonder (chat) | |
 | Debrief | Muse Wonder (structured) | |
 | Front page image | Muse Image | |
 | Speech to text | Muse Voice Transcribe | |
@@ -144,7 +147,30 @@ line's spoken duration at about 2.6 words per second and then sends `playback_do
 (default `muse-spark-1.3`), `LLM_STRUCTURED_MODEL` (default
 `muse-wonder-1.0`). Never commit `.env`.
 
-## Built during the hackathon
+## How it works
+
+- Scenario generation: a director prompt (crisis or profile) turns your
+  description into a fictional scenario with landmines, one reporter with an
+  agenda, and timed escalations.
+- Interview plan and state: the model drafts an interview plan of beats; if
+  that call fails, a deterministic fallback plan in code takes over
+  (`server/src/session/interview-state.ts`). The session tracks each beat with
+  a directive (PUSH to stay, MOVE_ON, at most one CALLBACK to a contradiction)
+  and never repeats a closed beat: a repeated line is retried once, then
+  replaced with a deterministic transition question.
+- Turn-taking for hesitant speakers: the reporter's next turn starts
+  speculatively after a 450 ms stable partial transcript; the end-of-turn
+  silence adapts (longer when the answer looks hesitant) and is capped so the
+  turn ends 4 s after the last speech; a late-continuation window still hears
+  an owner who resumes mid-reply while browser speech is talking.
+- Browser speech watchdog: reporter and anchor voices are on-device speech
+  synthesis with a 1.5 s start watchdog (cancel, one retry, then silent
+  reading). A failed line stays on screen and the server is told.
+- Debrief: the coach judges the transcript against practice guidance grounded
+  in crisis communication research (`docs/research/crisis-communication.md`,
+  `prompts/coach-knowledge.md`).
+
+## Built with Muse Code
 
 All code in this repo was written from scratch from 26 Oct 2026 by Muse Code,
 directed by Juhana Harju, with the briefs in `.muse-briefs/`. Hot Seat is an entry

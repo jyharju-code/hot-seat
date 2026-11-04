@@ -178,6 +178,32 @@ describe("interview state", () => {
   });
 });
 
+describe("fallback plan with many landmines (brief 19c)", () => {
+  const scenarioWithLandmines = (n: number) => ({
+    ...cafeTestScenario,
+    landmines: Array.from({ length: n }, (_, i) => ({
+      id: `L${i + 1}`,
+      fact: `Hidden fact number ${i + 1} about the display case`,
+      who_knows: "J1",
+      reveal_after_seconds: 0,
+      owner_knows: true,
+    })),
+  });
+
+  for (const n of [3, 5, 8]) {
+    it(`${n} landmines: 5..7 beats, close last, earliest landmines kept`, () => {
+      const plan = buildFallbackPlan(scenarioWithLandmines(n));
+      expect(plan.beats.length).toBeGreaterThanOrEqual(5);
+      expect(plan.beats.length).toBeLessThanOrEqual(7);
+      expect(plan.beats[plan.beats.length - 1]!.kind).toBe("close");
+      const kept = plan.beats.filter((b) => b.kind === "landmine").map((b) => b.landmine_id);
+      expect(kept).toEqual(
+        scenarioWithLandmines(n).landmines.slice(0, kept.length).map((m) => m.id),
+      );
+    });
+  }
+});
+
 describe("brain repeat guard (replay)", () => {
   it("retries once then uses the deterministic transition when the model repeats a closed beat", async () => {
     const prompts: JournalistPrompts = {

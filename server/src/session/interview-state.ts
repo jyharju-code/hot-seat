@@ -126,13 +126,28 @@ export function buildFallbackPlan(scenario: BrainScenario): InterviewPlan {
   if (humanFirst) ordered = [human, facts, responsibility, ...landmineBeats, action, close];
   else ordered = [facts, responsibility, ...landmineBeats, human, action, close];
   // Keep 5..7 beats: drop the separate human beat first (action still asks
-  // who is affected), then merge facts+responsibility if still too many.
+  // who is affected), then merge facts+responsibility once, then keep only as
+  // many landmine beats as fit (the earliest ones, in order). Every pass
+  // shrinks the list, so the loop always ends.
+  let mergedFacts = false;
   while (ordered.length > 7) {
+    const before = ordered.length;
     const idx = ordered.findIndex((b) => b.kind === "human_impact");
     if (idx >= 0) { ordered.splice(idx, 1); continue; }
-    const merged: InterviewBeat = { id: "facts", goal: `What happened and who is responsible: ${s.headline}`, done_when: "Owner gives their account and states their own role; an admission counts", max_questions: 3, kind: "facts" };
-    ordered = ordered.filter((b) => b.id !== "facts" && b.id !== "responsibility");
-    ordered.splice(humanFirst ? 1 : 0, 0, merged);
+    if (!mergedFacts) {
+      mergedFacts = true;
+      const merged: InterviewBeat = { id: "facts", goal: `What happened and who is responsible: ${s.headline}`, done_when: "Owner gives their account and states their own role; an admission counts", max_questions: 3, kind: "facts" };
+      ordered = ordered.filter((b) => b.id !== "facts" && b.id !== "responsibility");
+      ordered.splice(humanFirst ? 1 : 0, 0, merged);
+      continue;
+    }
+    const excess = ordered.length - 7;
+    const landminePositions: number[] = [];
+    ordered.forEach((b, i) => { if (b.kind === "landmine") landminePositions.push(i); });
+    const drop = new Set(landminePositions.slice(Math.max(0, landminePositions.length - excess)));
+    if (drop.size === 0) break;
+    ordered = ordered.filter((_, i) => !drop.has(i));
+    if (ordered.length >= before) break;
   }
   while (ordered.length < 5) ordered.splice(ordered.length - 1, 0, { id: `extra-${ordered.length}`, goal: s.agenda || "Follow the reporter's agenda", done_when: "Owner answers the agenda question", max_questions: 2, kind: "facts" });
   return withBeatDefaults({ beats: ordered });
